@@ -1,0 +1,11 @@
+services:
+  memgraph:
+    image: memgraph/memgraph:latest
+    ports:
+      - "7687:7687"
+    command: ["--bolt-address=0.0.0.0"]
+    volumes:
+      - memgraph_data:/var/lib/memgraph
+
+volumes:
+  memgraph_data:

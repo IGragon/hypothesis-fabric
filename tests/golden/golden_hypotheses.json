@@ -1,0 +1,16 @@
+[
+  {
+    "claim": "Xanthate collector addition increases Au flotation recovery",
+    "mechanism": "Xanthates chemisorb on gold surfaces increasing hydrophobicity, which enhances bubble attachment in flotation",
+    "expected_effect": "+5-10% Au recovery in flotation circuits",
+    "evidence_refs": ["chunk_001"],
+    "keywords": ["xanthate", "collector", "gold", "recovery", "flotation"]
+  },
+  {
+    "claim": "Sodium sulphide pre-treatment activates oxidized gold ores for flotation",
+    "mechanism": "Sulphidization forms a hydrophobic sulphide layer on oxidized gold particles, restoring floatability",
+    "expected_effect": "+3-7% Au recovery for oxidized ores",
+    "evidence_refs": ["chunk_003"],
+    "keywords": ["sodium sulphide", "activation", "oxidized", "gold", "flotation"]
+  }
+]

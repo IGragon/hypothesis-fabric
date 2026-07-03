@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+*.egg-info/
+sessions
+examples_api_integration/
+knowledge_base
