@@ -4,8 +4,10 @@ version = "0.1.0"
 description = "Hypothesis Fabric — metallurgy hypothesis generation"
 requires-python = ">=3.13"
 dependencies = [
+    "fastapi>=0.115",
     "langchain-openai>=0.1",
     "langgraph>=0.2",
+    "httpx>=0.28",
     "pydantic>=2.0",
     "pymupdf>=1.23",
     "sentence-transformers>=3.0",
@@ -15,13 +17,22 @@ dependencies = [
     "rapidfuzz>=3.0",
     "tiktoken>=0.7",
     "python-dotenv>=1.0",
+    "python-docx>=1.1,<2",
+    "openpyxl>=3.1.5",
+    "ddgs>=9.14.4",
+    "mp-api>=0.46.4",
+    "streamlit>=1.58.0",
+    "streamlit-agraph>=0.0.45",
+    "pytesseract>=0.3.13",
+    "pillow>=12.3.0",
+    "reportlab>=5.0.0",
 ]
 
 [project.scripts]
 hfabric = "hfabric.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "uvicorn>=0.30"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

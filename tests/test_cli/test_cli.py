@@ -153,6 +153,9 @@ class TestCmdRun:
             args = MagicMock()
             args.session_id = "nonexistent"
             args.query = "test"
+            args.provider = None
+            args.format = "json"
+            args.jira = False
 
             with pytest.raises(SystemExit):
                 cmd_run(args)
@@ -197,6 +200,9 @@ class TestCmdRun:
             args = MagicMock()
             args.session_id = "test"
             args.query = "test query"
+            args.provider = None
+            args.format = "json"
+            args.jira = False
 
             cmd_run(args)
 
@@ -215,6 +221,7 @@ class TestCmdEval:
 
             args = MagicMock()
             args.session_id = "nonexistent"
+            args.provider = None
 
             with pytest.raises(SystemExit):
                 cmd_eval(args)
@@ -229,6 +236,7 @@ class TestCmdEval:
 
             args = MagicMock()
             args.session_id = "test"
+            args.provider = None
 
             with pytest.raises(SystemExit):
                 cmd_eval(args)
@@ -296,6 +304,7 @@ class TestCmdEval:
 
             args = MagicMock()
             args.session_id = "test"
+            args.provider = None
 
             cmd_eval(args)
 

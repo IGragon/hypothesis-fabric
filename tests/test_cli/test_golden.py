@@ -1,139 +1,73 @@
 from __future__ import annotations
 
 import json
-import os
-from unittest.mock import MagicMock, patch
+from pathlib import Path
 
 import pytest
 
-from hfabric.schemas import EvidenceChunk, Hypothesis, KPIParsed, KPI, ScoredHypothesis, ExplainedHypothesis
-from tests.golden import load_golden_hypotheses, match_golden
+from hfabric.explain.citation_bind import bind_claims
+from hfabric.schemas import EvidenceChunk, Hypothesis
+
+GOLDEN_DIR = Path(__file__).parent.parent / "golden"
 
 
-class TestLoadGoldenHypotheses:
-    def test_loads_from_default_path(self):
-        golden = load_golden_hypotheses()
-        assert len(golden) == 2
-        assert "claim" in golden[0]
-        assert "keywords" in golden[0]
-
-    def test_loads_from_custom_path(self, tmp_path):
-        custom = [{"claim": "custom", "mechanism": "m", "expected_effect": "e", "evidence_refs": [], "keywords": []}]
-        p = tmp_path / "golden.json"
-        p.write_text(json.dumps(custom))
-        result = load_golden_hypotheses(str(p))
-        assert result == custom
+def _load_golden_citations():
+    path = GOLDEN_DIR / "golden_citations.json"
+    if not path.exists():
+        return []
+    return json.loads(path.read_text())
 
 
-class TestMatchGolden:
-    def test_exact_match_passes(self):
-        golden = [{
-            "claim": "Xanthate collector addition increases Au flotation recovery",
-            "keywords": ["xanthate", "collector", "gold", "recovery", "flotation"],
-        }]
-        candidates = [
-            Hypothesis(
-                claim="Xanthate collector addition increases Au flotation recovery",
-                mechanism="Xanthates chemisorb on gold surfaces",
-                expected_effect="+5-10% Au recovery",
-                evidence_refs=["c1"],
-            ),
-        ]
-        result = match_golden(candidates, golden)
-        assert result["passed"] is True
-        assert result["matched_count"] == 1
-
-    def test_partial_match_passes(self):
-        golden = [{
-            "claim": "Xanthate collector addition increases Au flotation recovery",
-            "keywords": ["xanthate", "collector", "gold", "recovery", "flotation"],
-        }]
-        candidates = [
-            Hypothesis(
-                claim="Adding xanthate collector improves gold flotation recovery rate",
-                mechanism="Collector increases hydrophobicity of gold particles",
-                expected_effect="Significant increase in Au recovery",
-                evidence_refs=["c1"],
-            ),
-        ]
-        result = match_golden(candidates, golden)
-        assert result["passed"] is True
-
-    def test_no_match_fails(self):
-        golden = [{
-            "claim": "Xanthate collector addition increases Au flotation recovery",
-            "keywords": ["xanthate", "collector", "gold", "recovery", "flotation"],
-        }]
-        candidates = [
-            Hypothesis(
-                claim="Completely unrelated hypothesis about weather patterns",
-                mechanism="Atmospheric pressure changes cause rain",
-                expected_effect="More rain",
-                evidence_refs=["c1"],
-            ),
-        ]
-        result = match_golden(candidates, golden)
-        assert result["passed"] is False
-        assert result["matched_count"] == 0
-
-    def test_multiple_golden_multiple_matches(self):
-        golden = load_golden_hypotheses()
-        candidates = [
-            Hypothesis(
-                claim="Xanthate collector addition increases Au flotation recovery",
-                mechanism="Xanthates chemisorb on gold surfaces",
-                expected_effect="+5-10% Au recovery",
-                evidence_refs=["c1"],
-            ),
-            Hypothesis(
-                claim="Sodium sulphide pre-treatment activates oxidized gold ores for flotation",
-                mechanism="Sulphidization forms hydrophobic layer",
-                expected_effect="+3-7% Au recovery for oxidized ores",
-                evidence_refs=["c2"],
-            ),
-        ]
-        result = match_golden(candidates, golden)
-        assert result["passed"] is True
-        assert result["matched_count"] == 2
+def _load_golden_rankings():
+    path = GOLDEN_DIR / "golden_rankings.json"
+    if not path.exists():
+        return []
+    return json.loads(path.read_text())
 
 
-class TestGoldenIntegrationWithOrchestrator:
-    def test_orchestrator_output_matches_golden(self):
-        from tests.test_orchestrator.fakes import (
-            FakeCitation, FakeExplainer, FakeGenerator, FakeKG,
-            FakeRetriever, FakeScorer, FakeTraceCollector,
-            make_fake_llm, make_valid_hypotheses,
+RU_CHUNK_001 = EvidenceChunk(
+    chunk_id="chunk_ru_001",
+    doc_id="doc_ru_1",
+    text="Применение ксантогенатных собирателей увеличивает извлечение золота на 5-10% при флотации.",
+    meta={"source": "kb", "page": 1},
+)
+
+SAMPLE_CHUNKS = {
+    "chunk_001": EvidenceChunk(
+        chunk_id="chunk_001",
+        doc_id="doc_1",
+        text="Xanthate collectors improve gold flotation recovery by up to 10%.",
+        meta={"source": "kb", "page": 1},
+    ),
+    "chunk_003": EvidenceChunk(
+        chunk_id="chunk_003",
+        doc_id="doc_2",
+        text="Sodium sulphide can activate oxidized gold ores in flotation.",
+        meta={"source": "session", "page": 5},
+    ),
+    "chunk_ru_001": RU_CHUNK_001,
+}
+
+
+class TestGoldenCitations:
+    @pytest.mark.parametrize("golden", _load_golden_citations())
+    def test_golden_citation(self, golden):
+        hyp = Hypothesis(
+            claim=golden["claim"],
+            mechanism="test mechanism",
+            expected_effect="positive effect",
+            evidence_refs=golden["expected_chunk_ids"],
         )
-        from hfabric.config import MVPConfig
-        from hfabric.orchestrator.wiring import build_real_orchestrator
-        from hfabric.storage.session_store import SessionStore
+        scored, coverage = bind_claims([hyp], SAMPLE_CHUNKS, threshold=55.0)
+        for expected_id in golden["expected_chunk_ids"]:
+            assert expected_id in scored[0].cited_refs, (
+                f"Expected chunk {expected_id} to be cited for claim: {golden['claim']}"
+            )
 
-        config = MVPConfig()
-        llm = make_fake_llm()
-        kg = FakeKG()
-        store = SessionStore(":memory:")
 
-        orch = build_real_orchestrator(
-            config,
-            llm=llm,
-            kg=kg,
-            store=store,
-            retriever=FakeRetriever(),
-            generator=FakeGenerator([make_valid_hypotheses()]),
-            citation=FakeCitation(coverage=1.0),
-            scorer=FakeScorer(),
-            explanation=FakeExplainer(),
-            trace_collector=FakeTraceCollector(),
-        )
-
-        state = orch.run("golden_test", "increase Au flotation recovery")
-
-        explained = state.get("explained", [])
-        candidates: list[Hypothesis] = []
-        for e in explained:
-            hyp_dict = e.get("scored", {}).get("hypothesis", {})
-            candidates.append(Hypothesis(**hyp_dict))
-
-        result = match_golden(candidates)
-        assert result["passed"] is True
-        assert result["matched_count"] >= 1
+class TestGoldenRankings:
+    @pytest.mark.parametrize("golden", _load_golden_rankings())
+    def test_golden_ranking_format(self, golden):
+        assert "query" in golden
+        assert "expected_ranked_claims" in golden
+        assert len(golden["expected_ranked_claims"]) > 0

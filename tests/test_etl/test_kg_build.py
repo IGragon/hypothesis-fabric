@@ -41,19 +41,19 @@ class TestExtractEntities:
 
     def test_extracts_material_elements(self):
         result = extract_entities("Gold and copper recovery.")
-        names = [e["properties"]["name"] for e in result if e["label"] == "Material"]
+        names = [e["properties"].get("display_name", e["properties"]["name"]) for e in result if e["label"] == "Material"]
         assert any("gold" in n.lower() for n in names)
         assert any("copper" in n.lower() for n in names)
 
     def test_extracts_material_minerals(self):
         result = extract_entities("Pyrite and chalcopyrite were present.")
-        names = [e["properties"]["name"] for e in result if e["label"] == "Material"]
+        names = [e["properties"].get("display_name", e["properties"]["name"]) for e in result if e["label"] == "Material"]
         assert any("pyrite" in n.lower() for n in names)
         assert any("chalcopyrite" in n.lower() for n in names)
 
     def test_extracts_material_reagents(self):
         result = extract_entities("Xanthate and MIBC were used as reagents.")
-        names = [e["properties"]["name"] for e in result if e["label"] == "Material"]
+        names = [e["properties"].get("display_name", e["properties"]["name"]) for e in result if e["label"] == "Material"]
         assert any("xanthate" in n.lower() for n in names)
         assert any("mibc" in n.lower() for n in names)
 
@@ -192,3 +192,169 @@ class TestExtractEdges:
         ]
         result = extract_edges(chunks)
         assert len(result) > 0
+
+
+RUSSIAN_MATERIAL_TEXT = (
+    "Извлечение золота и серебра из пиритных и халькопиритных руд было исследовано. "
+    "Ксантогенатные собиратели и вспениватель МИБК использовались. "
+    "Цианид добавлялся как депрессор при флотации."
+)
+
+RUSSIAN_PROPERTY_TEXT = (
+    "Извлечение золота составило 92.5%. рН пульпы был 10.5. "
+    "Крупность частиц P80 составила 75 мкм. Плотность составила 2.8 г/см³."
+)
+
+RUSSIAN_PARAMETER_TEXT = (
+    "Расход собирателя составил 50 г/т. Температура была 25°C. "
+    "Время флотации составило 15 мин. Плотность пульпы составила 30% твёрдого."
+)
+
+RUSSIAN_PROCESS_TEXT = (
+    "Флотация основная и контрольная стадии использовались. "
+    "Цикл измельчения включал мельницу полусамоизмельчения и шаровую мельницу. "
+    "Сорбционное выщелачивание применялось для извлечения золота."
+)
+
+RUSSIAN_MIXED_TEXT = (
+    "Флотация золота с ксантогенатным собирателем при расходе 30 г/т "
+    "обеспечила извлечение Au 90% при рН 10. Мельница полусамоизмельчения "
+    "измельчала халькопиритную руду до крупности P80 106 мкм."
+)
+
+
+class TestExtractEntitiesRussian:
+    def test_returns_list_of_dicts(self):
+        result = extract_entities("Какой-то текст.")
+        assert isinstance(result, list)
+
+    def test_extracts_russian_material_elements(self):
+        result = extract_entities(RUSSIAN_MATERIAL_TEXT)
+        names = [e["properties"].get("display_name", e["properties"]["name"]).lower() for e in result if e["label"] == "Material" and e["properties"]["category"].endswith("_ru")]
+        assert any("золот" in n for n in names)
+        assert any("серебр" in n for n in names)
+
+    def test_extracts_russian_material_minerals(self):
+        result = extract_entities(RUSSIAN_MATERIAL_TEXT)
+        names = [e["properties"].get("display_name", e["properties"]["name"]).lower() for e in result if e["label"] == "Material" and e["properties"]["category"] == "mineral_ru"]
+        assert any("пирит" in n for n in names)
+        assert any("халькопирит" in n for n in names)
+
+    def test_extracts_russian_material_reagents(self):
+        result = extract_entities(RUSSIAN_MATERIAL_TEXT)
+        names = [e["properties"].get("display_name", e["properties"]["name"]).lower() for e in result if e["label"] == "Material" and e["properties"]["category"] == "reagent_ru"]
+        assert any("ксантогенат" in n for n in names)
+        assert any("мибк" in n for n in names)
+
+    def test_extracts_russian_property_recovery(self):
+        result = extract_entities(RUSSIAN_PROPERTY_TEXT)
+        props = [e for e in result if e["label"] == "Property" and e["properties"]["category"] == "recovery_ru"]
+        assert len(props) > 0
+
+    def test_extracts_russian_property_ph(self):
+        result = extract_entities(RUSSIAN_PROPERTY_TEXT)
+        props = [e for e in result if e["label"] == "Property" and e["properties"]["category"] == "pH_ru"]
+        assert len(props) > 0
+
+    def test_extracts_russian_parameter_dosage(self):
+        result = extract_entities(RUSSIAN_PARAMETER_TEXT)
+        params = [e for e in result if e["label"] == "Parameter" and e["properties"]["category"] == "dosage_ru"]
+        assert len(params) > 0
+
+    def test_extracts_russian_process_flotation(self):
+        result = extract_entities(RUSSIAN_PROCESS_TEXT)
+        procs = [e for e in result if e["label"] == "Process" and e["properties"]["category"] == "flotation_ru"]
+        assert len(procs) > 0
+
+    def test_extracts_russian_process_comminution(self):
+        result = extract_entities(RUSSIAN_PROCESS_TEXT)
+        procs = [e for e in result if e["label"] == "Process" and e["properties"]["category"] == "comminution_ru"]
+        assert len(procs) > 0
+
+    def test_russian_entities_have_required_keys(self):
+        result = extract_entities(RUSSIAN_MATERIAL_TEXT)
+        assert len(result) > 0
+        for entity in result:
+            assert "label" in entity
+            assert "properties" in entity
+            assert "name" in entity["properties"]
+            assert "category" in entity["properties"]
+
+    def test_russian_and_english_mixed_text(self):
+        result = extract_entities(RUSSIAN_MIXED_TEXT)
+        assert len(result) > 0
+
+        russian_categories = {e["properties"]["category"] for e in result if e["properties"]["category"].endswith("_ru")}
+        assert len(russian_categories) > 0
+
+        english_categories = {e["properties"]["category"] for e in result if not e["properties"]["category"].endswith("_ru")}
+        assert len(english_categories) > 0
+
+
+from hfabric.etl.kg_build import detect_contradictions
+
+
+CONTRADICTING_CHUNKS = [
+    {
+        "chunk_id": "c1",
+        "text": "Increasing gold recovery using xanthate collectors was demonstrated.",
+        "meta": {"doc_id": "d1"},
+    },
+    {
+        "chunk_id": "c2",
+        "text": "The addition of xanthate collector decreases gold recovery significantly.",
+        "meta": {"doc_id": "d2"},
+    },
+]
+
+NO_CONFLICT_CHUNKS = [
+    {
+        "chunk_id": "c1",
+        "text": "Gold recovery increases with xanthate addition.",
+        "meta": {"doc_id": "d1"},
+    },
+    {
+        "chunk_id": "c2",
+        "text": "Gold recovery also increases with PAX collector.",
+        "meta": {"doc_id": "d2"},
+    },
+]
+
+RUSSIAN_CONTRADICTING_CHUNKS = [
+    {
+        "chunk_id": "c_ru_1",
+        "text": "Применение ксантогената повышает извлечение золота на 10%.",
+        "meta": {"doc_id": "d_ru_1"},
+    },
+    {
+        "chunk_id": "c_ru_2",
+        "text": "Добавление ксантогената снижает извлечение золота при флотации.",
+        "meta": {"doc_id": "d_ru_2"},
+    },
+]
+
+
+class TestDetectContradictions:
+    def test_detects_contradicting_chunks(self):
+        result = detect_contradictions(CONTRADICTING_CHUNKS)
+        assert len(result) > 0
+        assert result[0]["rel_type"] == "contradicts"
+        assert result[0]["from_name"] in ("c1", "c2")
+        assert result[0]["to_name"] in ("c1", "c2")
+
+    def test_no_conflicts_returns_empty(self):
+        result = detect_contradictions(NO_CONFLICT_CHUNKS)
+        assert result == []
+
+    def test_empty_chunks_returns_empty(self):
+        result = detect_contradictions([])
+        assert result == []
+
+    def test_russian_contradictions_detected(self):
+        result = detect_contradictions(RUSSIAN_CONTRADICTING_CHUNKS)
+        assert len(result) > 0
+        assert result[0]["rel_type"] == "contradicts"
+
+    def test_single_chunk_returns_empty(self):
+        result = detect_contradictions([CONTRADICTING_CHUNKS[0]])
+        assert result == []

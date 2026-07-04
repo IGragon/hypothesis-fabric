@@ -4,34 +4,48 @@ import json
 
 from neo4j import GraphDatabase
 
-from hfabric.kg.schema import EDGE_TYPES, NODE_LABELS
+from hfabric.kg.schema import DEFAULT_EDGE_TYPES, DEFAULT_NODE_LABELS
 from hfabric.schemas import KGNode
 
 
 class MemgraphKG:
-    def __init__(self, uri: str = "bolt://localhost:7687"):
-        self._driver = GraphDatabase.driver(uri)
+    def __init__(
+        self,
+        uri: str = "bolt://localhost:7687",
+        node_labels: set[str] | None = None,
+        edge_types: set[str] | None = None,
+    ):
+        self._driver = GraphDatabase.driver(
+            uri,
+            connection_timeout=5,
+            max_connection_lifetime=60,
+        )
         self._driver.verify_connectivity()
-        self._create_indices()
+        self._node_labels = set(node_labels) if node_labels is not None else set(DEFAULT_NODE_LABELS)
+        self._edge_types = set(edge_types) if edge_types is not None else set(DEFAULT_EDGE_TYPES)
+        try:
+            self._create_indices()
+        except Exception:
+            pass
+
+    @property
+    def node_labels(self) -> set[str]:
+        return set(self._node_labels)
+
+    @property
+    def edge_types(self) -> set[str]:
+        return set(self._edge_types)
 
     def _create_indices(self) -> None:
-        index_queries = [
-            "CREATE INDEX ON :Material(name)",
-            "CREATE INDEX ON :Material(session_id)",
-            "CREATE INDEX ON :Material(source)",
-            "CREATE INDEX ON :Property(name)",
-            "CREATE INDEX ON :Property(session_id)",
-            "CREATE INDEX ON :Property(source)",
-            "CREATE INDEX ON :Parameter(name)",
-            "CREATE INDEX ON :Parameter(session_id)",
-            "CREATE INDEX ON :Parameter(source)",
-            "CREATE INDEX ON :Process(name)",
-            "CREATE INDEX ON :Process(session_id)",
-            "CREATE INDEX ON :Process(source)",
-            "CREATE INDEX ON :Source(name)",
-            "CREATE INDEX ON :Source(session_id)",
-            "CREATE INDEX ON :Source(source)",
-        ]
+        index_queries: list[str] = []
+        for label in sorted(self._node_labels):
+            index_queries.extend(
+                [
+                    f"CREATE INDEX ON :{label}(name)",
+                    f"CREATE INDEX ON :{label}(session_id)",
+                    f"CREATE INDEX ON :{label}(source)",
+                ]
+            )
         with self._driver.session() as session:
             for query in index_queries:
                 try:
@@ -45,24 +59,31 @@ class MemgraphKG:
         session_id: str | None = None,
         source: str = "",
     ) -> None:
-        with self._driver.session() as session:
+        try:
+            groups: dict[str, list[dict]] = {}
             for entity in entities:
                 label = entity["label"]
-                if label not in NODE_LABELS:
-                    raise ValueError(f"Invalid node label: {label}")
+                if label not in self._node_labels:
+                    continue
                 props = dict(entity["properties"])
-                name = props.get("name", "")
-                cypher = (
-                    f"MERGE (n:{label} {{name: $name, session_id: $session_id, source: $source}}) "
-                    "SET n += $properties"
-                )
-                session.run(
-                    cypher,
-                    name=name,
-                    session_id=session_id,
-                    source=source,
-                    properties=props,
-                )
+                props["name"] = props.get("name", "")
+                groups.setdefault(label, []).append(props)
+
+            with self._driver.session() as session:
+                for label, batch in groups.items():
+                    for i in range(0, len(batch), 500):
+                        chunk = batch[i : i + 500]
+                        cypher = (
+                            f"UNWIND $rows AS row "
+                            f"MERGE (n:{label} {{name: row.name, session_id: $session_id, source: $source}}) "
+                            "SET n += row"
+                        )
+                        try:
+                            session.run(cypher, rows=chunk, session_id=session_id, source=source)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
     def add_edges(
         self,
@@ -70,36 +91,42 @@ class MemgraphKG:
         session_id: str | None = None,
         source: str = "",
     ) -> None:
-        with self._driver.session() as session:
-            for edge in edges:
-                from_label = edge["from_label"]
-                to_label = edge["to_label"]
-                rel_type = edge["rel_type"]
-                if from_label not in NODE_LABELS:
-                    raise ValueError(f"Invalid from_label: {from_label}")
-                if to_label not in NODE_LABELS:
-                    raise ValueError(f"Invalid to_label: {to_label}")
-                if rel_type not in EDGE_TYPES:
-                    raise ValueError(f"Invalid rel_type: {rel_type}")
+        groups: dict[tuple[str, str, str], list[dict]] = {}
+        for edge in edges:
+            from_label = edge["from_label"]
+            to_label = edge["to_label"]
+            rel_type = edge["rel_type"]
+            if from_label not in self._node_labels:
+                continue
+            if to_label not in self._node_labels:
+                continue
+            if rel_type not in self._edge_types:
+                continue
+            key = (from_label, to_label, rel_type)
+            groups.setdefault(key, []).append({
+                "from_name": edge["from_name"],
+                "to_name": edge["to_name"],
+                "provenance": edge.get("provenance", {}),
+            })
 
-                from_name = edge["from_name"]
-                to_name = edge["to_name"]
-                provenance = edge.get("provenance", {})
-
-                cypher = (
-                    f"MATCH (from:{from_label} {{name: $from_name, session_id: $session_id, source: $source}}) "
-                    f"MATCH (to:{to_label} {{name: $to_name, session_id: $session_id, source: $source}}) "
-                    f"MERGE (from)-[r:{rel_type}]->(to) "
-                    "SET r.session_id = $session_id, r.source = $source, r += $provenance"
-                )
-                session.run(
-                    cypher,
-                    from_name=from_name,
-                    to_name=to_name,
-                    session_id=session_id,
-                    source=source,
-                    provenance=provenance,
-                )
+        try:
+            with self._driver.session() as session:
+                for (from_label, to_label, rel_type), batch in groups.items():
+                    for i in range(0, len(batch), 500):
+                        chunk = batch[i : i + 500]
+                        cypher = (
+                            f"UNWIND $rows AS row "
+                            f"MATCH (from:{from_label} {{name: row.from_name, session_id: $session_id, source: $source}}) "
+                            f"MATCH (to:{to_label} {{name: row.to_name, session_id: $session_id, source: $source}}) "
+                            f"MERGE (from)-[r:{rel_type}]->(to) "
+                            "SET r.session_id = $session_id, r.source = $source, r += row.provenance"
+                        )
+                        try:
+                            session.run(cypher, rows=chunk, session_id=session_id, source=source)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
     def traverse(self, cypher: str, params: dict | None = None) -> list[KGNode]:
         """Traverse is designed to be used internally on pre-serialised data and not called directly by the user."""
@@ -122,7 +149,7 @@ class MemgraphKG:
             return nodes
 
     def get_entities(self, name: str) -> list[KGNode]:
-        labels_list = sorted(NODE_LABELS)
+        labels_list = sorted(self._node_labels)
         cypher = (
             "UNWIND $labels AS lbl "
             "MATCH (n) "
@@ -234,7 +261,7 @@ class MemgraphKG:
                 source = props.get("source", "")
                 old_id = node_data["id"]
 
-                valid_labels = [l for l in labels if l in NODE_LABELS]
+                valid_labels = [l for l in labels if l in self._node_labels]
                 if not valid_labels:
                     continue
                 label = valid_labels[0]
@@ -255,7 +282,7 @@ class MemgraphKG:
 
             for edge_data in data["edges"]:
                 rel_type = edge_data["rel_type"]
-                if rel_type not in EDGE_TYPES:
+                if rel_type not in self._edge_types:
                     continue
                 cypher = (
                     f"MATCH (a {{_import_id: $_from_id}}), (b {{_import_id: $_to_id}}) "

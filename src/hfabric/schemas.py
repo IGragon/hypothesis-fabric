@@ -43,6 +43,19 @@ class ExplainedHypothesis(BaseModel):
     uncertainty: str
     verification_plan: str
     graph_neighbourhood: list[str]
+    # B4 rich narrative sections (each inline-cites evidence chunk_ids / URLs)
+    effect_cause_examples: list[str] = []
+    general_approach: str = ""
+    actionable_now: str = ""
+    why_it_matters: str = ""
+    best_practices: str = ""
+    novelty: str = ""
+    risks: str = ""
+    # Per-section validated citation refs and external URLs surfaced in the report
+    section_citations: dict[str, list[str]] = {}
+    external_urls: list[str] = []
+    # Constraint violations detected at FE4 gate (kept as warnings, not dropped)
+    constraint_violations: list[str] = []
 
 
 class RunResult(BaseModel):
@@ -53,6 +66,7 @@ class RunResult(BaseModel):
     ranked: list[ExplainedHypothesis]
     export_path: str | None = None
     status: str = "incomplete"
+    notes: list[str] = []
 
 
 class TraceRecord(BaseModel):

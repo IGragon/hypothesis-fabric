@@ -17,9 +17,13 @@ from hfabric.embeddings import SentenceTransformersProvider
 from hfabric.etl import ETL
 from hfabric.explain.citation_bind import bind_claims
 from hfabric.explain.explain_slot import ExplainSlot
+from hfabric.export.csv_writer import write_csv
+from hfabric.export.docx_writer import write_docx
+from hfabric.export.pdf_writer import write_pdf
 from hfabric.export.writer import write_export
 from hfabric.generator.synth import CandidateSynthesizer
 from hfabric.kg.client import MemgraphKG
+from hfabric.kg.schema import load_schema
 from hfabric.llm import create_chat_model
 from hfabric.obs.traces import TraceCollector
 from hfabric.orchestrator import Orchestrator
@@ -31,6 +35,7 @@ from hfabric.schemas import (
     RunResult,
     ScoredHypothesis,
 )
+from hfabric.storage.feedback_store import FeedbackStore
 from hfabric.storage.session_store import SessionStore
 
 
@@ -46,6 +51,21 @@ class _CitationAdapter:
 class _ExportAdapter:
     def export(self, result: RunResult, session_id: str) -> tuple[str, str]:
         return write_export(result, session_id)
+
+
+class _DocxExportAdapter:
+    def export(self, result: RunResult, session_id: str) -> str:
+        return write_docx(result, session_id)
+
+
+class _PdfExportAdapter:
+    def export(self, result: RunResult, session_id: str) -> str:
+        return write_pdf(result, session_id)
+
+
+class _CsvExportAdapter:
+    def export(self, result: RunResult, session_id: str) -> str:
+        return write_csv(result, session_id)
 
 
 def build_real_orchestrator(
@@ -65,10 +85,18 @@ def build_real_orchestrator(
     trace_collector: TraceCollector | None = None,
 ) -> Orchestrator:
     if llm is None:
-        llm = create_chat_model(config.provider, config.model)
+        llm = create_chat_model(config.provider, config.model, temperature=config.temperature)
 
     if kg is None:
-        kg = MemgraphKG(config.memgraph_uri)
+        kg_schema = load_schema(getattr(config, "kg_schema_path", None))
+        try:
+            kg = MemgraphKG(
+                config.memgraph_uri,
+                node_labels=kg_schema.node_labels,
+                edge_types=kg_schema.edge_types,
+            )
+        except Exception:
+            kg = None
 
     if embeddings is None:
         embeddings = SentenceTransformersProvider(config.embeddings_model)
@@ -85,7 +113,7 @@ def build_real_orchestrator(
         trace_collector = TraceCollector(store)
 
     if retriever is None:
-        retriever = Retriever(embeddings, kg, config)
+        retriever = Retriever(embeddings, kg, config, llm=llm)
 
     if generator is None:
         generator = CandidateSynthesizer(llm, config)
@@ -94,13 +122,28 @@ def build_real_orchestrator(
         citation = _CitationAdapter()
 
     if scorer is None:
-        scorer = Scorer(kg, config)
+        feedback_store = None
+        if session_id:
+            fb_path = os.path.join("sessions", session_id, "feedback.db")
+            if os.path.isfile(fb_path):
+                feedback_store = FeedbackStore(fb_path)
+        scorer = Scorer(kg, config, feedback_store=feedback_store)
 
     if explanation is None:
-        explanation = ExplainSlot(llm)
+        per_hyp_timeout = getattr(config, "timeout_explain_per_hypothesis", None)
+        if per_hyp_timeout is None:
+            per_hyp_timeout = getattr(config, "timeout_explain", 120) / max(1, getattr(config, "max_explain_hypotheses", 3))
+        explanation = ExplainSlot(llm, timeout_seconds=per_hyp_timeout)
 
     if exporter is None:
-        exporter = _ExportAdapter()
+        if config.export_format == "docx":
+            exporter = _DocxExportAdapter()
+        elif config.export_format == "pdf":
+            exporter = _PdfExportAdapter()
+        elif config.export_format == "csv":
+            exporter = _CsvExportAdapter()
+        else:
+            exporter = _ExportAdapter()
 
     return Orchestrator(
         llm=llm,

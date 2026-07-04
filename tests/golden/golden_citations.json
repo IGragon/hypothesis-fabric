@@ -1,0 +1,27 @@
+[
+  {
+    "claim": "Xanthate collector addition increases Au recovery in flotation",
+    "expected_chunk_ids": ["chunk_001"],
+    "description": "EN claim → EN chunk about xanthate collectors"
+  },
+  {
+    "claim": "Добавление ксантогенатного собирателя повышает извлечение золота при флотации",
+    "expected_chunk_ids": ["chunk_ru_001"],
+    "description": "RU claim → RU chunk about xanthate collectors"
+  },
+  {
+    "claim": "Sodium sulphide pre-treatment activates oxidized gold ores",
+    "expected_chunk_ids": ["chunk_003"],
+    "description": "EN claim → EN chunk about Na2S activation"
+  },
+  {
+    "claim": "Xanthate addition improves gold recovery",
+    "expected_chunk_ids": ["chunk_ru_001"],
+    "description": "EN claim → RU chunk (cross-script trust)"
+  },
+  {
+    "claim": "Применение сульфида натрия активирует окисленные золотосодержащие руды",
+    "expected_chunk_ids": ["chunk_003"],
+    "description": "RU claim → EN chunk (cross-script trust)"
+  }
+]

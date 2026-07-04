@@ -4,7 +4,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from hfabric.scorer.features import extract_effect, extract_feasibility, extract_novelty
+from hfabric.scorer.features import (
+    extract_effect,
+    extract_feasibility,
+    extract_novelty,
+    extract_realizability,
+    extract_risk,
+)
 from hfabric.schemas import Hypothesis, KPI, KPIParsed, KGNode
 
 
@@ -211,4 +217,143 @@ class TestExtractEffect:
         )
         r1 = extract_effect(hyp, sample_kpi)
         r2 = extract_effect(hyp, sample_kpi)
+        assert r1 == r2
+
+
+class TestExtractRisk:
+    def test_cyanide_has_high_risk(self):
+        hyp = Hypothesis(
+            claim="Increase cyanide dosage",
+            mechanism="m",
+            expected_effect="e",
+            evidence_refs=["c1"],
+        )
+        risk = extract_risk(hyp)
+        assert risk >= 0.7
+
+    def test_simple_method_has_low_risk(self):
+        hyp = Hypothesis(
+            claim="Adjust pH of pulp",
+            mechanism="m",
+            expected_effect="e",
+            evidence_refs=["c1"],
+        )
+        risk = extract_risk(hyp)
+        assert risk < 0.5
+
+    def test_baseline_risk_for_no_keywords(self):
+        hyp = Hypothesis(
+            claim="Optimize standard flotation parameters",
+            mechanism="m",
+            expected_effect="e",
+            evidence_refs=["c1"],
+        )
+        risk = extract_risk(hyp)
+        assert risk == 0.2
+
+    def test_cyrillic_toxic_keyword(self):
+        hyp = Hypothesis(
+            claim="Использование токсичного реагента для извлечения",
+            mechanism="m",
+            expected_effect="e",
+            evidence_refs=["c1"],
+        )
+        risk = extract_risk(hyp)
+        assert risk >= 0.6
+
+    def test_returns_max_risk_for_multiple_keywords(self):
+        hyp = Hypothesis(
+            claim="Cyanide and hazardous waste increase toxic environmental impact",
+            mechanism="m",
+            expected_effect="e",
+            evidence_refs=["c1"],
+        )
+        risk = extract_risk(hyp)
+        assert risk == 0.8
+
+    def test_deterministic_same_input(self):
+        hyp = Hypothesis(
+            claim="Use toxic chemicals for recovery",
+            mechanism="m",
+            expected_effect="e",
+            evidence_refs=["c1"],
+        )
+        r1 = extract_risk(hyp)
+        r2 = extract_risk(hyp)
+        assert r1 == r2
+
+
+class TestExtractRealizability:
+    def test_realizability_without_constraints_is_high(self):
+        hyp = Hypothesis(
+            claim="Simple modification",
+            mechanism="m",
+            expected_effect="e",
+            evidence_refs=["c1"],
+        )
+        r = extract_realizability(hyp, [])
+        assert r >= 0.7
+
+    def test_constraint_violation_reduces_realizability(self):
+        hyp = Hypothesis(
+            claim="Use cyanide to increase recovery",
+            mechanism="m",
+            expected_effect="e",
+            evidence_refs=["c1"],
+        )
+        r = extract_realizability(hyp, ["no cyanide increase"])
+        assert r < 0.7
+
+    def test_multiple_constraint_violations(self):
+        hyp = Hypothesis(
+            claim="Use cyanide and toxic reagents to increase recovery",
+            mechanism="m",
+            expected_effect="e",
+            evidence_refs=["c1"],
+        )
+        r = extract_realizability(hyp, ["no cyanide", "no toxic reagents"])
+        assert r < 0.5
+
+    def test_simple_keyword_boosts_realizability(self):
+        hyp = Hypothesis(
+            claim="Simple standard modification of existing process",
+            mechanism="m",
+            expected_effect="e",
+            evidence_refs=["c1"],
+        )
+        r = extract_realizability(hyp, [])
+        assert r >= 0.8
+
+    def test_realizability_clamps_to_minimum(self):
+        hyp = Hypothesis(
+            claim="Use cyanide and hazardous waste from cyanide processing",
+            mechanism="m",
+            expected_effect="e",
+            evidence_refs=["c1"],
+        )
+        r = extract_realizability(
+            hyp,
+            ["no cyanide increase", "no hazardous waste", "no cyanide processing"],
+        )
+        assert r >= 0.1
+
+    def test_realizability_clamps_to_maximum(self):
+        hyp = Hypothesis(
+            claim="Simple existing standard approach",
+            mechanism="m",
+            expected_effect="e",
+            evidence_refs=["c1"],
+        )
+        r = extract_realizability(hyp, [])
+        assert r <= 1.0
+
+    def test_deterministic_same_input(self):
+        hyp = Hypothesis(
+            claim="Simple modification",
+            mechanism="m",
+            expected_effect="e",
+            evidence_refs=["c1"],
+        )
+        r1 = extract_realizability(hyp, ["no cyanide increase"])
+        r2 = extract_realizability(hyp, ["no cyanide increase"])
         assert r1 == r2

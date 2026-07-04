@@ -1,0 +1,10 @@
+[
+  {
+    "query": "increase Au flotation recovery by 5% without raising cyanide use",
+    "expected_ranked_claims": [
+      "Xanthate collector addition increases Au recovery",
+      "Sodium sulphide pre-treatment activates oxidized gold"
+    ],
+    "description": "Xanthate-based hypotheses should rank above alternative approaches for Au recovery"
+  }
+]

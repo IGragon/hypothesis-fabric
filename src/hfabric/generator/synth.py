@@ -55,28 +55,43 @@ def _build_prompt(evidence: list[EvidenceChunk], kpi: KPIParsed) -> dict[str, st
     evidence_text = "\n".join(evidence_lines)
 
     system_prompt = (
-        "You are a metallurgy research assistant. "
-        "Generate research hypotheses based on the provided evidence."
+        "Вы — исследователь-металлург. Сгенерируйте научно-обоснованные гипотезы на основе "
+        "предоставленных доказательств. Каждая гипотеза должна строго соответствовать "
+        "указанным ограничениям и опираться на конкретные фрагменты доказательств. "
+        "Выведите результат как валидный JSON-объект."
     )
 
-    user_prompt = f"""Research Goal: {kpi.goal}
-KPI: {kpi.kpi.metric} — {kpi.kpi.direction} (target: {kpi.kpi.target or 'N/A'})
-Constraints: {', '.join(kpi.constraints) if kpi.constraints else 'none'}
-Language: {kpi.language}
+    constraints_block = (
+        "\n".join(f"  - {c}" for c in kpi.constraints) if kpi.constraints else "  (нет ограничений)"
+    )
 
-Evidence chunks:
+    user_prompt = f"""Исследовательская задача: {kpi.goal}
+KPI: {kpi.kpi.metric} — {kpi.kpi.direction} (целевое значение: {kpi.kpi.target or 'N/A'})
+Ограничения:
+{constraints_block}
+Язык вывода: {kpi.language}
+
+Фрагменты доказательств (цитируйте по идентификатору [chunk_id]):
 {evidence_text}
 
-Instructions:
-1. Generate 3-7 research hypotheses based on the evidence above.
-2. Each hypothesis MUST include:
-   - claim: a clear, specific statement of what should be tested
-   - mechanism: explanation of how/why it works
-   - expected_effect: the predicted outcome (quantitative if possible)
-3. Each hypothesis MUST reference at least one evidence chunk by its chunk_id in evidence_refs.
-4. Output in the language specified: {kpi.language}
-5. Follow the constraints listed above.
-6. Only propose hypotheses that the evidence actually supports."""
+Инструкции:
+1. Сгенерируйте 3-7 исследовательских гипотез на основе доказательств выше.
+2. КАЖДАЯ гипотеза ОБЯЗАНА включать:
+   - claim: чёткое, конкретное утверждение того, что нужно проверить
+   - mechanism: объяснение, как/почему это работает
+   - expected_effect: предсказанный результат (количественный, если возможно)
+   - verification_plan: краткий план проверки (шаги, критерии успеха)
+3. КАЖДАЯ гипотеза ОБЯЗАНА ссылаться хотя бы на один фрагмент доказательств по его chunk_id \
+в поле evidence_refs. Идентификаторы имеют вид chunk_0007, chunk_0012 и т.д. — используйте \
+их в точности как показано выше.
+4. НЕ предлагайте оборудование или методы, не входящие в список ограничений. \
+Если в ограничениях указано «доступное оборудование: …», используйте ТОЛЬКО перечисленное оборудование.
+5. Если KPI упоминает несколько металлов (например, медь и никель), КАЖДАЯ гипотеза должна \
+адресовать оба металла или явно указать, почему фокусируется на одном.
+6. Соблюдайте перечисленные ограничения. Бюджетные ограничения означают, что нельзя предлагать \
+капиталоёмкие решения (новое оборудование, крупные перестройки).
+7. Предлагайте только гипотезы, которые реально поддерживаются доказательствами.
+8. Пишите на языке: {kpi.language}."""
 
     return {"system": system_prompt, "user": user_prompt}
 
@@ -85,10 +100,10 @@ def _format_retry_prompt(original_prompt: str, errors: list[str]) -> str:
     error_details = "\n".join(f"  - {e}" for e in errors)
     return (
         f"{original_prompt}\n\n"
-        f"PREVIOUS ATTEMPT WAS INVALID. Errors:\n{error_details}\n\n"
-        f"Please regenerate. Ensure all hypotheses have non-empty fields "
-        f"(claim, mechanism, expected_effect each >= {_MIN_FIELD_LENGTH} chars) "
-        f"and valid evidence_refs that match provided chunk_ids."
+        f"ПРЕДЫДУЩАЯ ПОПЫТКА БЫЛА НЕКОРРЕКТНОЙ. Ошибки:\n{error_details}\n\n"
+        f"Пожалуйста, перегенерируйте. Убедитесь, что все гипотезы имеют непустые поля "
+        f"(claim, mechanism, expected_effect каждый >= {_MIN_FIELD_LENGTH} символов) "
+        f"и корректные evidence_refs, совпадающие с предоставленными chunk_id."
     )
 
 
@@ -96,9 +111,7 @@ class CandidateSynthesizer:
     def __init__(self, llm: BaseChatModel, config: MVPConfig | None = None):
         self._llm = llm
         self._config = config or MVPConfig()
-        self._structured = llm.with_structured_output(
-            HypothesisList, method="json_schema"
-        )
+        self._structured = llm.with_structured_output(HypothesisList, method="function_calling")
 
     def generate(
         self,
@@ -123,7 +136,9 @@ class CandidateSynthesizer:
 
         for attempt in range(self._config.fe2_max_reprompt + 1):
             try:
-                result: HypothesisList = self._structured.invoke(messages)
+                result: HypothesisList | None = self._structured.invoke(messages)
+                if result is None:
+                    raise ValueError("LLM returned None from structured output")
             except Exception:
                 if attempt < self._config.fe2_max_reprompt:
                     current_prompt = _format_retry_prompt(prompt["user"], ["LLM invocation failed"])

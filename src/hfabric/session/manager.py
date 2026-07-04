@@ -10,7 +10,7 @@ class SessionManager:
     def __init__(self, base_dir: str = "sessions") -> None:
         self._base_dir = base_dir
 
-    def create_session(self, nl_query: str) -> dict:
+    def create_session(self, nl_query: str, constraints: str = "") -> dict:
         session_id = str(uuid.uuid4())[:8]
         session_dir = os.path.join(self._base_dir, session_id)
 
@@ -21,6 +21,7 @@ class SessionManager:
         meta = {
             "session_id": session_id,
             "nl_query": nl_query,
+            "constraints": constraints,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "status": "created",
         }
@@ -49,11 +50,13 @@ class SessionManager:
     def export_dir(self, session_id: str) -> str:
         return os.path.join(self._base_dir, session_id, "export")
 
+    _SUPPORTED = (".pdf", ".xlsx", ".docx", ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp")
+
     def has_raw_files(self, session_id: str) -> bool:
         raw = self.raw_files_dir(session_id)
         if not os.path.isdir(raw):
             return False
-        return any(f.lower().endswith(".pdf") for f in os.listdir(raw))
+        return any(f.lower().endswith(self._SUPPORTED) for f in os.listdir(raw))
 
     def update_status(self, session_id: str, status: str) -> None:
         meta = self.get_session(session_id)

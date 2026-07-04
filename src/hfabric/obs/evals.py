@@ -102,72 +102,16 @@ def constraint_pass_check(
     hypotheses: list[Hypothesis] | list[ScoredHypothesis],
     constraints: list[str],
 ) -> dict:
-    import re
-
-    _negation_words = {
-        "no", "not", "without", "avoid", "prevent",
-        "reduce", "decrease", "lower", "less",
-    }
-    _action_words = _negation_words | {
-        "use", "apply", "utilize", "employ", "decrease",
-        "reduce", "lower", "less", "drop",
-        "increase", "improve", "enhance", "raise", "boost",
-        "higher", "more", "add", "+",
-    }
-    _positive_indicators = {
-        "increase", "improve", "enhance", "raise", "boost",
-        "higher", "more", "add", "+",
-    }
-
-    pass_count = 0
-
-    for item in hypotheses:
-        h = _get_hypothesis(item)
-        text = (h.claim + " " + h.mechanism + " " + h.expected_effect).lower()
-        violated = False
-        for c in constraints:
-            cl = c.lower()
-            is_negation = any(
-                cl.startswith(w) or f" {w} " in f" {cl} "
-                for w in _negation_words
-            )
-
-            tokens = re.findall(r"\w+", cl)
-            keywords = [
-                t for t in tokens
-                if t not in _action_words and len(t) > 2
-            ]
-
-            if is_negation:
-                for kw in keywords:
-                    idx = text.find(kw)
-                    while idx != -1:
-                        window_start = max(0, idx - 60)
-                        window_end = min(len(text), idx + len(kw) + 60)
-                        window = text[window_start:window_end]
-
-                        has_negation = any(w in window for w in _negation_words)
-                        has_positive = any(w in window for w in _positive_indicators)
-
-                        if has_positive and not has_negation:
-                            violated = True
-                            break
-
-                        idx = text.find(kw, idx + 1)
-
-                    if violated:
-                        break
-            else:
-                if keywords and not any(kw in text for kw in keywords):
-                    violated = True
-
-            if violated:
-                break
-
-        if not violated:
-            pass_count += 1
+    from hfabric.scorer.constraint import constraint_check
 
     total = len(hypotheses)
+    pass_count = 0
+    for item in hypotheses:
+        h = _get_hypothesis(item)
+        result = constraint_check(h, constraints)
+        if result["ok"]:
+            pass_count += 1
+
     return {
         "passed": pass_count == total and total > 0,
         "pass_count": pass_count,

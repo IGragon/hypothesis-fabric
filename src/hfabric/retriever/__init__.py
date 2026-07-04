@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from hfabric.config import MVPConfig
 from hfabric.contracts import KGProtocol
@@ -25,10 +26,12 @@ class Retriever:
         embeddings: EmbeddingsProvider,
         kg: KGProtocol,
         config: MVPConfig,
+        llm: Any = None,
     ):
         self._embeddings = embeddings
         self._kg = kg
         self._config = config
+        self._llm = llm
 
     def retrieve(
         self,
@@ -78,8 +81,12 @@ class Retriever:
         if not all_evidence:
             return {"evidence": [], "low_confidence": True}
 
-        from hfabric.llm import create_chat_model
-        llm = create_chat_model(cfg.provider, cfg.model)
+        if self._llm is None:
+            raise RuntimeError(
+                "Retriever requires an LLM via constructor injection; "
+                "pass llm=... to Retriever (dependency injection)."
+            )
+        llm = self._llm
 
         reranked, low_confidence = rerank_evidence(
             all_evidence, kpi.goal, llm, cfg.rerank_top_k, cfg.fe1_max_query_expansion

@@ -78,9 +78,13 @@ class TestWeightedRanker:
 
     def test_uses_default_weights_when_none_given(self):
         ranker = WeightedRanker()
-        assert ranker.weights["novelty"] == 0.3
-        assert ranker.weights["feasibility"] == 0.4
-        assert ranker.weights["effect"] == 0.3
+        assert ranker.weights["novelty"] == 0.20
+        assert ranker.weights["feasibility"] == 0.25
+        assert ranker.weights["effect"] == 0.20
+        assert ranker.weights["risk"] == 0.10
+        assert ranker.weights["realizability"] == 0.10
+        assert ranker.weights["evidence"] == 0.10
+        assert ranker.weights["violation"] == 0.15
 
     def test_cited_refs_is_empty(self):
         ranker = WeightedRanker()

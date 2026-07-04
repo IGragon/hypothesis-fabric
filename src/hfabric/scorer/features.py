@@ -3,6 +3,15 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from hfabric.scorer.constraint import (
+    constraint_check,
+    constraint_satisfied,
+    negation_violated,
+    get_topical_keywords,
+    is_negation_constraint,
+    _is_equipment_availability,
+)
+
 if TYPE_CHECKING:
     from hfabric.contracts import KGProtocol
     from hfabric.schemas import Hypothesis, KPIParsed
@@ -11,27 +20,9 @@ _ENTITY_RE = re.compile(r"\b[A-Z][a-zA-Z]{2,}\b")
 _CHEM_RE = re.compile(r"\b[A-Z][a-z]?\b")
 _TOK_RE = re.compile(r"\w+")
 
-_NEGATION_WORDS = {
-    "no", "not", "without", "avoid", "prevent",
-    "reduce", "decrease", "lower", "less",
-}
-_POSITIVE_INDICATORS = {
-    "increase", "improve", "enhance", "raise", "boost",
-    "higher", "more", "add", "+",
-}
-_ACTION_WORDS = _POSITIVE_INDICATORS | {
-    "use", "apply", "utilize", "employ", "decrease",
-    "reduce", "lower", "less", "drop",
-}
-
 
 def _tokenize(text: str) -> set[str]:
     return set(t.lower() for t in _TOK_RE.findall(text))
-
-
-def _get_topical_keywords(constraint_lower: str) -> list[str]:
-    all_tokens = _TOK_RE.findall(constraint_lower)
-    return [t for t in all_tokens if t not in _ACTION_WORDS and t not in _NEGATION_WORDS and (len(t) > 2 or (len(t) == 2 and t[0].isupper()))]
 
 
 def _find_entities(text: str) -> set[str]:
@@ -43,34 +34,6 @@ def _find_entities(text: str) -> set[str]:
         "We", "He", "It", "Is", "Be", "No", "So", "Or", "If", "Do", "Go",
     }
     return {t for t in all_terms if t not in stop}
-
-
-def _is_negation_constraint(constraint_lower: str) -> bool:
-    return any(
-        constraint_lower.startswith(w) or f" {w} " in f" {constraint_lower} "
-        for w in _NEGATION_WORDS
-    )
-
-
-def _negation_violated(text: str, keywords: list[str]) -> bool:
-    text_lower = text.lower()
-    for kw in keywords:
-        kw_lower = kw.lower()
-        idx = text_lower.find(kw_lower)
-        while idx != -1:
-            window_start = max(0, idx - 50)
-            window_end = min(len(text_lower), idx + len(kw_lower) + 50)
-            window = text_lower[window_start:window_end]
-
-            has_negation = any(w in window for w in _NEGATION_WORDS)
-            has_positive = any(w in window for w in _POSITIVE_INDICATORS)
-
-            if has_positive and not has_negation:
-                return True
-
-            idx = text_lower.find(kw_lower, idx + 1)
-
-    return False
 
 
 def extract_novelty(hypothesis: Hypothesis, kg: KGProtocol) -> float:
@@ -107,22 +70,81 @@ def extract_feasibility(hypothesis: Hypothesis, constraints: list[str]) -> float
     if not constraints:
         return 1.0
 
-    text = hypothesis.claim + " " + hypothesis.mechanism + " " + hypothesis.expected_effect
-
     satisfied = 0
     for constraint in constraints:
-        constraint_lower = constraint.lower()
-        keywords = _get_topical_keywords(constraint_lower)
-
-        if _is_negation_constraint(constraint_lower):
-            if not _negation_violated(text, keywords):
-                satisfied += 1
-        else:
-            text_lower = text.lower()
-            if not keywords or all(kw.lower() in text_lower for kw in keywords):
-                satisfied += 1
+        if constraint_satisfied(hypothesis, constraint):
+            satisfied += 1
 
     return satisfied / len(constraints)
+
+
+def extract_risk(hypothesis: Hypothesis, kg: KGProtocol | None = None) -> float:
+    claim = hypothesis.claim.lower()
+    risk_keywords = {
+        "cyanide": 0.8,
+        "cyanid": 0.8,
+        "цианид": 0.8,
+        "toxic": 0.7,
+        "токсич": 0.7,
+        "expensive": 0.6,
+        "дорог": 0.6,
+        "химический реагент": 0.5,
+        "environmental": 0.7,
+        "экологич": 0.7,
+        "hazardous": 0.8,
+        "опасн": 0.7,
+        "waste": 0.5,
+        "отход": 0.5,
+        "pressure": 0.4,
+        "давление": 0.4,
+        "high temperature": 0.4,
+        "высокая температура": 0.4,
+    }
+    score = 0.0
+    matched = 0
+    for kw, risk in risk_keywords.items():
+        if kw in claim:
+            score = max(score, risk)
+            matched += 1
+
+    if matched == 0:
+        return 0.2
+    return score
+
+
+def extract_realizability(hypothesis: Hypothesis, constraints: list[str]) -> float:
+    claim = hypothesis.claim.lower()
+
+    if not constraints:
+        return 0.8
+
+    feasibility_keywords = {
+        "simple": 0.9, "standard": 0.8, "existing": 0.7,
+        "простой": 0.9, "стандартный": 0.8, "существующий": 0.7,
+        "modify": 0.7, "adjust": 0.7, "fine-tune": 0.8,
+        "модифицировать": 0.7, "настроить": 0.8, "регулировать": 0.7,
+    }
+
+    base = 0.6
+    for kw, boost in feasibility_keywords.items():
+        if kw in claim:
+            base = max(base, boost)
+
+    constraint_violations = 0
+    for const in constraints:
+        const_lower = const.lower()
+        if is_negation_constraint(const_lower):
+            keywords = get_topical_keywords(const_lower)
+            if negation_violated(hypothesis.claim + " " + hypothesis.mechanism, keywords):
+                constraint_violations += 1
+        elif _is_equipment_availability(const_lower):
+            if not constraint_satisfied(hypothesis, const):
+                constraint_violations += 1
+
+    if constraint_violations > 0:
+        base -= 0.3 * constraint_violations
+
+    return max(0.1, min(1.0, base))
 
 
 def extract_effect(hypothesis: Hypothesis, kpi: KPIParsed) -> float:

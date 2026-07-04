@@ -135,7 +135,7 @@ class TestWriteExport:
         assert "Expected Effect:" in content
         assert "Justification:" in content
         assert "Uncertainty:" in content
-        assert "Verification Plan:" in content
+        assert "Verification plan" in content
         assert "Knowledge Graph Neighbourhood" in content
         assert "gold --has_property--> Au recovery" in content
         assert "---" in content
@@ -194,7 +194,7 @@ class TestWriteExport:
         assert "How to *improve* <Au>" in content
         assert "Use **Xanthate**" in content
         assert "Chemisorption on [gold] surfaces" in content
-        assert "> Xanthate > 50g/t is *effective*" in content
+        assert "Xanthate > 50g/t is *effective*" in content
 
     def test_paths_created_correctly(self, temp_workdir, sample_run_result):
         json_path, md_path = write_export(sample_run_result, "session-abc")
@@ -233,7 +233,7 @@ class TestWriteExport:
 
         with open(md_path, encoding="utf-8") as f:
             content = f.read()
-        assert "Evidence:** None" in content
+        assert "Evidence / Sources:** None" in content
         assert "Knowledge Graph Neighbourhood:** None" in content
 
 

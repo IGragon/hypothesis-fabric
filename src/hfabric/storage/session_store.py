@@ -19,8 +19,9 @@ STAGES = [
 
 class SessionStore:
     def __init__(self, db_path: str) -> None:
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
         self._conn.execute("PRAGMA journal_mode=WAL;")
+        self._conn.execute("PRAGMA busy_timeout=30000;")
         self._conn.execute("PRAGMA foreign_keys=ON;")
         self._create_tables()
 
@@ -67,6 +68,9 @@ class SessionStore:
 
     def init(self, run_id: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            "DELETE FROM stage_state WHERE run_id = ?", (run_id,)
+        )
         self._conn.executemany(
             "INSERT INTO stage_state (run_id, stage, status, started_at) VALUES (?, ?, 'pending', ?)",
             [(run_id, stage, now) for stage in STAGES],
@@ -162,3 +166,9 @@ class SessionStore:
             }
             for r in rows
         ]
+
+    def close(self) -> None:
+        try:
+            self._conn.close()
+        except Exception:
+            pass

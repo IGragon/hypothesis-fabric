@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any, Callable, Protocol
 
+from hfabric.obs.redaction import redact_trace as _redact_trace
 from hfabric.schemas import TraceRecord
 
 
@@ -33,6 +34,7 @@ class TraceCollector:
             latency_ms=latency_ms,
             status=status,
         )
+        _redact_trace(trace)
         self._store.save_trace(trace)
         return trace
 
@@ -60,6 +62,7 @@ class TraceCollector:
                 latency_ms=latency_ms,
                 status="error",
             )
+            _redact_trace(trace)
             self._store.save_trace(trace)
             raise
 

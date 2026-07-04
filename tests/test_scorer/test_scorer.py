@@ -17,6 +17,8 @@ class TestScorer:
             assert "novelty" in item.features
             assert "feasibility" in item.features
             assert "effect" in item.features
+            assert "risk" in item.features
+            assert "realizability" in item.features
 
     def test_score_returns_sorted_by_score(self, mvp_config, fake_kg, sample_hypotheses, sample_chunks, sample_kpi):
         scorer = Scorer(fake_kg, mvp_config)
@@ -41,3 +43,5 @@ class TestScorer:
         assert scorer.ranker.weights["novelty"] == mvp_config.weight_novelty
         assert scorer.ranker.weights["feasibility"] == mvp_config.weight_feasibility
         assert scorer.ranker.weights["effect"] == mvp_config.weight_effect
+        assert scorer.ranker.weights["risk"] == mvp_config.weight_risk
+        assert scorer.ranker.weights["realizability"] == mvp_config.weight_realizability

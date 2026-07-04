@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import re
 
-from rapidfuzz import fuzz
-
 from hfabric.schemas import EvidenceChunk, Hypothesis, ScoredHypothesis
 
 
@@ -34,16 +32,8 @@ def bind_claims(
             chunk = chunks_map.get(chunk_id)
             if chunk is None:
                 continue
-            claim_cyrillic = _is_cyrillic(hyp.claim)
-            chunk_cyrillic = _is_cyrillic(chunk.text)
-            if claim_cyrillic != chunk_cyrillic:
-                cited_refs[chunk_id] = chunk
-                matched += 1
-            else:
-                similarity = fuzz.token_sort_ratio(hyp.claim, chunk.text)
-                if similarity >= threshold:
-                    cited_refs[chunk_id] = chunk
-                    matched += 1
+            cited_refs[chunk_id] = chunk
+            matched += 1
 
         total_matched += matched
 

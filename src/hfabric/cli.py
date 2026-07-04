@@ -6,7 +6,7 @@ import os
 import sys
 from typing import Any
 
-from hfabric.config import MVPConfig
+from hfabric.config import MVPConfig, ProviderType
 from hfabric.schemas import (
     ExplainedHypothesis,
     Hypothesis,
@@ -31,11 +31,44 @@ def build_arg_parser() -> argparse.ArgumentParser:
     run_ = sub.add_parser("run", help="Execute a run pipeline")
     run_.add_argument("session_id", type=str, help="Session ID")
     run_.add_argument("query", type=str, help="NL query for the run")
+    run_.add_argument("--provider", type=str, default=None,
+                      choices=[p.value for p in ProviderType],
+                      help="LLM provider (default: yandex)")
+    run_.add_argument("--format", choices=["json", "docx", "pdf", "csv"], default="json",
+                      help="Export format (default: json)")
+    run_.add_argument("--jira", action="store_true", default=False,
+                      help="Export hypotheses to Jira after run")
+    run_.add_argument("--youtrack", action="store_true", default=False,
+                      help="Export hypotheses to YouTrack after run")
     run_.set_defaults(func=cmd_run)
 
     eval_ = sub.add_parser("eval", help="Run evals on a session")
     eval_.add_argument("session_id", type=str, help="Session ID")
+    eval_.add_argument("--provider", type=str, default=None,
+                       choices=[p.value for p in ProviderType],
+                       help="LLM provider (default: yandex)")
     eval_.set_defaults(func=cmd_eval)
+
+    rerun_ = sub.add_parser("rerun", help="Re-run a pipeline stage")
+    rerun_.add_argument("session_id", type=str, help="Session ID")
+    rerun_.add_argument("run_id", type=str, help="Run ID to load state from")
+    rerun_.add_argument("--from-stage", type=str, default="generate", help="Stage to restart from")
+    rerun_.add_argument("--provider", type=str, default=None,
+                        choices=[p.value for p in ProviderType],
+                        help="LLM provider (default: yandex)")
+    rerun_.set_defaults(func=cmd_rerun)
+
+    serve_ = sub.add_parser("serve", help="Start FastAPI server")
+    serve_.add_argument("--port", type=int, default=8000, help="Port to listen on")
+    serve_.set_defaults(func=cmd_serve)
+
+    serve_ui = sub.add_parser("serve-ui", help="Start Streamlit UI")
+    serve_ui.add_argument("--port", type=int, default=8501, help="Port to listen on")
+    serve_ui.set_defaults(func=cmd_serve_ui)
+
+    serve_pg = sub.add_parser("serve-playground", help="Start Streamlit retrieval playground")
+    serve_pg.add_argument("--port", type=int, default=8502, help="Port to listen on")
+    serve_pg.set_defaults(func=cmd_serve_playground)
 
     return parser
 
@@ -49,6 +82,62 @@ def _load_env() -> None:
         pass
 
 
+def _configure_logging() -> None:
+    from hfabric.obs.logging import configure_logging
+
+    configure_logging(os.environ.get("HFABRIC_LOG_LEVEL", "INFO"))
+
+
+def _provider_from_env_or_arg(provider_str: str | None) -> ProviderType | None:
+    if provider_str:
+        return ProviderType(provider_str)
+    env_prov = os.environ.get("HFABRIC_PROVIDER")
+    if env_prov:
+        try:
+            return ProviderType(env_prov)
+        except ValueError:
+            return None
+    return None
+
+
+def build_config_from_env_and_overrides(
+    provider_str: str | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> MVPConfig:
+    provider = _provider_from_env_or_arg(provider_str)
+    config = MVPConfig(provider=provider) if provider is not None else MVPConfig()
+    overrides = overrides or {}
+    weight_fields = (
+        "weight_novelty", "weight_feasibility", "weight_effect",
+        "weight_risk", "weight_realizability",
+        "weight_evidence", "weight_violation",
+    )
+    for f in weight_fields:
+        if f in overrides and overrides[f] is not None:
+            setattr(config, f, float(overrides[f]))
+    for f in (
+        "model", "temperature", "external_search", "external_top_k",
+        "export_format", "enable_vlm", "enable_ocr",
+        "timeout_explain", "timeout_explain_per_hypothesis",
+        "max_explain_hypotheses",
+    ):
+        if f in overrides and overrides[f] is not None:
+            setattr(config, f, overrides[f])
+    if "provider" in overrides and overrides.get("provider") is not None:
+        try:
+            config.provider = ProviderType(overrides["provider"])
+            if overrides.get("model") is None:
+                config.model = None
+                config.__post_init__()
+        except ValueError:
+            pass
+    return config
+
+
+def _load_config(provider_str: str | None = None) -> MVPConfig:
+    return build_config_from_env_and_overrides(provider_str=provider_str)
+
+
 def _build_kb_index(config: MVPConfig) -> Any:
     from hfabric.embeddings import SentenceTransformersProvider
     from hfabric.etl import ETL
@@ -56,7 +145,7 @@ def _build_kb_index(config: MVPConfig) -> Any:
 
     embeddings = SentenceTransformersProvider(config.embeddings_model)
     kg = MemgraphKG(config.memgraph_uri)
-    etl = ETL(embeddings, kg)
+    etl = ETL(embeddings, kg, config)
     return etl
 
 
@@ -109,7 +198,7 @@ def _build_session_index(config: MVPConfig, session_id: str) -> None:
 
     embeddings = SentenceTransformersProvider(config.embeddings_model)
     kg = MemgraphKG(config.memgraph_uri)
-    etl = ETL(embeddings, kg)
+    etl = ETL(embeddings, kg, config)
 
     print(f"Building session index from raw_files/...")
     artifact = etl.build_index(raw_dir, index_dir, session_id, "session")
@@ -117,9 +206,22 @@ def _build_session_index(config: MVPConfig, session_id: str) -> None:
 
 
 def _print_results(state: dict) -> None:
+    notified = False
+    errors = state.get("errors", [])
+    if errors:
+        print(f"\n{'='*70}")
+        print(f"Pipeline errors ({len(errors)}):")
+        print(f"{'='*70}")
+        for e in errors:
+            print(f"  - {e}")
+        notified = True
+
     explained_raw = state.get("explained", [])
     if not explained_raw:
-        print("No hypotheses generated.")
+        if not notified:
+            print("No hypotheses generated.")
+        status = state.get("status", "unknown")
+        print(f"Status: {status}")
         return
 
     print(f"\n{'='*70}")
@@ -163,7 +265,8 @@ def _print_results(state: dict) -> None:
 
 def cmd_run(args: argparse.Namespace) -> None:
     _load_env()
-    config = MVPConfig()
+    config = _load_config(args.provider)
+    config.export_format = args.format
     session_id = args.session_id
 
     from hfabric.session.manager import SessionManager
@@ -185,6 +288,52 @@ def cmd_run(args: argparse.Namespace) -> None:
     manager.update_status(session_id, state.get("status", "unknown"))
     _print_results(state)
 
+    if args.jira:
+        _export_to_tracker(session_id, "jira")
+    if args.youtrack:
+        _export_to_tracker(session_id, "youtrack")
+
+
+def _export_to_tracker(session_id: str, tracker: str) -> None:
+    data = _load_run_result(session_id)
+    if data is None:
+        print(f"{tracker} export skipped: no run result found")
+        return
+    run_id = data.get("run_id", "")
+    if tracker == "jira":
+        from hfabric.export.jira import JiraExporter
+        exporter = JiraExporter(
+            base_url=os.environ.get("JIRA_BASE_URL", ""),
+            api_token=os.environ.get("JIRA_API_TOKEN", ""),
+            project_key=os.environ.get("JIRA_PROJECT_KEY", "HF"),
+            email=os.environ.get("JIRA_EMAIL", ""),
+        )
+        key = "key"
+    else:
+        from hfabric.export.youtrack import YouTrackExporter
+        exporter = YouTrackExporter(
+            base_url=os.environ.get("YOUTRACK_BASE_URL", ""),
+            token=os.environ.get("YOUTRACK_TOKEN", ""),
+            project_id=os.environ.get("YOUTRACK_PROJECT_ID", "0-0"),
+        )
+        key = "idReadable"
+    created = 0
+    mocked = False
+    for eh in data.get("ranked", []):
+        claim = eh.get("scored", {}).get("hypothesis", {}).get("claim", "")
+        ext_id = f"{run_id}:{abs(hash(claim)) % 10**10}"
+        r = exporter.create_task(
+            summary=claim[:200],
+            description=eh.get("justification", "") + "\n" + eh.get("verification_plan", ""),
+            external_id=ext_id,
+        )
+        if r:
+            created += 1
+            if r.get("status") == "mocked":
+                mocked = True
+    note = " (mocked — set env vars to enable real export)" if mocked else ""
+    print(f"{tracker} export: {created} tasks created{note}")
+
 
 def _load_run_result(session_id: str) -> dict | None:
     from hfabric.session.manager import SessionManager
@@ -199,7 +348,7 @@ def _load_run_result(session_id: str) -> dict | None:
 
 def cmd_eval(args: argparse.Namespace) -> None:
     _load_env()
-    config = MVPConfig()
+    config = _load_config(args.provider)
     session_id = args.session_id
 
     from hfabric.session.manager import SessionManager
@@ -274,9 +423,73 @@ def cmd_eval(args: argparse.Namespace) -> None:
     print()
 
 
+def cmd_rerun(args: argparse.Namespace) -> None:
+    _load_env()
+    config = _load_config(args.provider)
+    session_id = args.session_id
+
+    from hfabric.session.manager import SessionManager
+
+    manager = SessionManager()
+    meta = manager.get_session(session_id)
+    if meta is None:
+        print(f"Error: session '{session_id}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+    _build_session_index(config, session_id)
+
+    from hfabric.orchestrator.wiring import build_real_orchestrator
+
+    print(f"Rerunning pipeline for session {session_id} from stage '{args.from_stage}'...")
+    orchestrator = build_real_orchestrator(config, session_id=session_id)
+    state = orchestrator.rerun(session_id, args.run_id, args.from_stage)
+
+    manager.update_status(session_id, state.get("status", "unknown"))
+    _print_results(state)
+
+
+def cmd_serve(args: argparse.Namespace) -> None:
+    import uvicorn
+
+    _load_env()
+    _configure_logging()
+    uvicorn.run("hfabric.api.app:app", host="0.0.0.0", port=args.port, reload=False)
+
+
+def cmd_serve_ui(args: argparse.Namespace) -> None:
+    _load_env()
+    _configure_logging()
+    from streamlit.web import cli as stcli
+
+    ui_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "ui", "app.py")
+    if not os.path.isfile(ui_path):
+        print(f"Error: UI not found at {ui_path}", file=sys.stderr)
+        sys.exit(1)
+    sys.argv = ["streamlit", "run", ui_path, "--server.port", str(args.port),
+                "--server.headless", "true", "--server.fileWatcherType", "none"]
+    stcli.main()
+
+
+def cmd_serve_playground(args: argparse.Namespace) -> None:
+    _load_env()
+    _configure_logging()
+    from streamlit.web import cli as stcli
+
+    ui_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "ui", "playground.py")
+    if not os.path.isfile(ui_path):
+        print(f"Error: playground not found at {ui_path}", file=sys.stderr)
+        sys.exit(1)
+    sys.argv = ["streamlit", "run", ui_path, "--server.port", str(args.port),
+                "--server.headless", "true", "--server.fileWatcherType", "none"]
+    stcli.main()
+
+
 def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
+    if args.command in ("run", "eval", "rerun", "serve", "serve-ui", "serve-playground"):
+        _load_env()
+        _configure_logging()
     args.func(args)
 
 

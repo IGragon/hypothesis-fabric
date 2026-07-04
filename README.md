@@ -11,7 +11,8 @@ generates ranked hypotheses with citations, scores them, and exports a report.
 - [uv](https://docs.astral.sh/uv/) (package manager)
 - Python ≥ 3.13
 - Docker (for Memgraph)
-- A Yandex AI Studio or RouterAI API key
+- A Yandex AI Studio, RouterAI, ProxyAPI, or DeepSeek API key
+  (the default provider is `deepseek`; set `provider` in `MVPConfig` or `--provider` on the CLI)
 - (Optional) `HF_TOKEN` — HuggingFace access token to avoid rate limits
   when downloading the embeddings model on first run
 
@@ -26,6 +27,12 @@ cp .env_example .env
 # Edit .env and fill in:
 #   YC_FOLDER_ID, YC_API_KEY  (for Yandex provider)
 #   or ROUTERAI_API_KEY        (for RouterAI provider)
+#   or PROXY_API_KEY / DEEPSEEK_API_KEY
+# Optional integrations:
+#   JIRA_BASE_URL, JIRA_API_TOKEN, JIRA_PROJECT_KEY, JIRA_EMAIL  (Jira export)
+#   YOUTRACK_BASE_URL, YOUTRACK_TOKEN, YOUTRACK_PROJECT_ID      (YouTrack export)
+#   MP_API_KEY          (Materials Project external grounding)
+#   CITRINATION_API_KEY (Citrination external grounding)
 
 # 3. Start Memgraph
 docker compose up -d memgraph
@@ -49,7 +56,7 @@ uv run pytest -v
 uv run pytest tests/test_cli/test_golden.py::TestMatchGolden::test_exact_match_passes
 ```
 
-All 336 tests pass without external services. Tests that would require LLM API
+All 566 tests pass without external services. Tests that would require LLM API
 calls or Memgraph use deterministic fakes.
 
 ## Manual end-to-end demo
@@ -170,7 +177,7 @@ All knobs are in `MVPConfig` (`src/hfabric/config.py`). Key fields:
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `provider` | `yandex` | LLM provider (`yandex` or `routerai`) |
+| `provider` | `deepseek` | LLM provider (`yandex`/`routerai`/`proxyapi`/`deepseek`/`local`) |
 | `model` | provider default | LLM model name |
 | `embeddings_model` | `intfloat/multilingual-e5-small` | Sentence transformer model |
 | `vector_top_k` | 20 | FAISS results per index |
@@ -179,6 +186,9 @@ All knobs are in `MVPConfig` (`src/hfabric/config.py`). Key fields:
 | `citation_coverage_min` | 0.5 | FE6 coverage gate |
 | `fe2_max_reprompt` | 3 | Generator retry cap |
 | `memgraph_uri` | `bolt://localhost:7687` | Memgraph Bolt URI |
+| `external_search` | `web` | External grounding: `none`/`web`/`web+mp`/`all` or comma list `web,mp,citrination,nims` |
+| `export_format` | `json` | Export format: `json`/`docx`/`pdf`/`csv` |
+| `kg_schema_path` | `None` | Optional YAML overriding KG node labels / edge types / domain patterns (R-K4 scalability) |
 
 ## Troubleshooting
 

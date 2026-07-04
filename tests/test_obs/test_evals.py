@@ -243,6 +243,117 @@ class TestConstraintPassCheck:
         assert result["passed"] is True
 
 
+class TestConstraintCheckUnified:
+    def _make_h(self, claim: str) -> Hypothesis:
+        return Hypothesis(
+            claim=claim,
+            mechanism="A valid mechanism with enough text",
+            expected_effect="Better recovery rate",
+            evidence_refs=["ref_1"],
+        )
+
+    def test_single_pass_consistent(self) -> None:
+        from hfabric.scorer.constraint import constraint_check
+
+        h = self._make_h("Use xanthate to improve Au recovery")
+        constraints = ["use xanthate"]
+        cc = constraint_check(h, constraints)
+        cpc = constraint_pass_check([h], constraints)
+        assert cc["ok"] == cpc["passed"]
+        assert cpc["pass_count"] == 1
+        assert cpc["total"] == 1
+
+    def test_single_fail_consistent(self) -> None:
+        from hfabric.scorer.constraint import constraint_check
+
+        h = self._make_h("Use cyanide for leaching")
+        constraints = ["must use xanthate"]
+        cc = constraint_check(h, constraints)
+        cpc = constraint_pass_check([h], constraints)
+        assert cc["ok"] == cpc["passed"]
+        assert cpc["pass_count"] == 0
+
+    def test_negation_violated_consistent(self) -> None:
+        from hfabric.scorer.constraint import constraint_check
+
+        h = self._make_h("increase cyanide usage for better results")
+        constraints = ["no cyanide increase"]
+        cc = constraint_check(h, constraints)
+        cpc = constraint_pass_check([h], constraints)
+        assert cc["ok"] == cpc["passed"]
+        assert cc["ok"] is False
+
+    def test_negation_passes_consistent(self) -> None:
+        from hfabric.scorer.constraint import constraint_check
+
+        h = self._make_h("maintain cyanide at current levels")
+        constraints = ["no cyanide increase"]
+        cc = constraint_check(h, constraints)
+        cpc = constraint_pass_check([h], constraints)
+        assert cc["ok"] == cpc["passed"]
+        assert cc["ok"] is True
+
+    def test_no_constraints_consistent(self) -> None:
+        from hfabric.scorer.constraint import constraint_check
+
+        h = self._make_h("Any claim text")
+        constraints: list[str] = []
+        cc = constraint_check(h, constraints)
+        cpc = constraint_pass_check([h], constraints)
+        assert cc["ok"] == cpc["passed"]
+
+    def test_two_letter_uppercase_keyword(self) -> None:
+        from hfabric.scorer.constraint import constraint_check
+
+        h = self._make_h("Using Fe additives for smelting")
+        constraints = ["must use Fe"]
+        cc = constraint_check(h, constraints)
+        cpc = constraint_pass_check([h], constraints)
+        assert cc["ok"] == cpc["passed"]
+
+    def test_mixed_hypotheses_aggregates_correctly(self) -> None:
+        from hfabric.scorer.constraint import constraint_check
+
+        h_pass = self._make_h("Use xanthate to improve Au recovery")
+        h_fail = self._make_h("Use cyanide for leaching")
+        constraints = ["must use xanthate"]
+        cpc = constraint_pass_check([h_pass, h_fail], constraints)
+        assert cpc["pass_count"] == 1
+        assert cpc["total"] == 2
+        assert cpc["pass_rate"] == 0.5
+        cc_pass = constraint_check(h_pass, constraints)
+        cc_fail = constraint_check(h_fail, constraints)
+        assert cc_pass["ok"] is True
+        assert cc_fail["ok"] is False
+
+    def test_multiple_constraints_all_satisfied(self) -> None:
+        from hfabric.scorer.constraint import constraint_check
+
+        h = self._make_h("Use xanthate to improve Au recovery")
+        constraints = ["must use xanthate", "must improve Au recovery"]
+        cc = constraint_check(h, constraints)
+        cpc = constraint_pass_check([h], constraints)
+        assert cc["ok"] == cpc["passed"]
+        assert cc["ok"] is True
+
+    def test_multiple_constraints_one_violated(self) -> None:
+        from hfabric.scorer.constraint import constraint_check
+
+        h = self._make_h("Use xanthate to improve Au recovery")
+        constraints = ["must use xanthate", "must use cyanide"]
+        cc = constraint_check(h, constraints)
+        cpc = constraint_pass_check([h], constraints)
+        assert cc["ok"] == cpc["passed"]
+        assert cc["ok"] is False
+
+    def test_empty_hypotheses_list(self) -> None:
+        cpc = constraint_pass_check([], ["no cyanide"])
+        assert cpc["passed"] is False
+        assert cpc["pass_count"] == 0
+        assert cpc["total"] == 0
+        assert cpc["pass_rate"] == 0.0
+
+
 class TestRunEvals:
     def test_produces_complete_report_dict(self) -> None:
         h = Hypothesis(

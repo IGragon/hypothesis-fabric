@@ -9,7 +9,7 @@ generate, explain, kpi_parse). Everything else is deterministic.
 
 ```bash
 uv sync                    # install dependencies (creates .venv)
-uv run pytest              # run all 336 tests (no external services needed)
+uv run pytest              # run all 566 tests (no external services needed)
 uv run pytest tests/test_orchestrator/   # run a specific module
 uv run pytest -v           # verbose output
 uv run hfabric index-kb    # build KB index from knowledge_base/ PDFs
@@ -23,8 +23,8 @@ No lint or typecheck commands are configured yet. Python 3.13+ required.
 ## Architecture
 
 The system is split into 12 modules (M1–M12) per `docs/system-design.md`.
-The MVP implements all 12 at varying depth. See `MVP_DESIGN.md` for the
-simplified spec and `MVP_RETROSPECTIVE.md` for gap analysis.
+The MVP implements all 12 at varying depth. Gap analysis lives in the
+"Gotchas and known issues" and "What to consider in the future" sections below.
 
 ### Core design principles
 
@@ -119,12 +119,10 @@ nodes handle the drift — but do not introduce new drift without updating nodes
 
 ### Duplicate constraint logic
 
-- `src/hfabric/scorer/constraint.py:constraint_check` uses a context-window
-  approach (checks positive indicators near the constraint keyword).
-- `src/hfabric/obs/evals.py:constraint_pass_check` previously had a simpler
-  global check that produced false positives. It now mirrors the context-window
-  approach, but these two implementations should be unified — `evals.py`
-  should import from `scorer/constraint.py`, not reimplement.
+- Constraint checking is unified in `src/hfabric/scorer/constraint.py`
+  (`constraint_satisfied`/`constraint_check`). `obs/evals.constraint_pass_check`
+  and `scorer/features.extract_feasibility`/`extract_realizability` both import
+  and reuse the single implementation. Do not reimplement this logic elsewhere.
 
 ### SessionStore initialization
 
@@ -133,12 +131,12 @@ nodes handle the drift — but do not introduce new drift without updating nodes
   add a new entry point that bypasses `Orchestrator.run()`, you must call
   `store.init()` yourself.
 
-### Retriever creates LLM internally
+### Retriever requires LLM via constructor injection
 
-- `Retriever.retrieve()` calls `create_chat_model()` inside the method body.
-  This bypasses dependency injection. When testing or wiring, either mock
-  `create_chat_model` or inject a fake retriever. Future: refactor to accept
-  LLM via constructor.
+- `Retriever.__init__` accepts `llm=...`. `Retriever.retrieve()` raises
+  `RuntimeError` if no LLM was injected — it no longer silently creates one.
+  `build_real_orchestrator` always injects the LLM. The convenience
+  `generator/__init__.py:generate()` accepts an `llm=` override too.
 
 ### HuggingFace embeddings download
 
@@ -161,16 +159,15 @@ citation bug (English claims, Russian chunks) wasn't caught. **Add fixtures
 with mixed-script content (English claims + Russian chunks) to every test
 module that processes text.**
 
-### 3. Single source of truth for shared logic
+### 3. Single source of truth for shared logic (DONE)
 
-Constraint checking logic existed in two places (`scorer/constraint.py` and
-`obs/evals.py`) and diverged silently. **Never duplicate cross-module logic.
-If `evals.py` needs constraint checking, import it from `scorer/constraint.py`.**
+Constraint checking is now unified; `evals.py` and `features.py` import from
+`scorer/constraint.py`. **Never duplicate cross-module logic.**
 
-### 4. Constructor injection for all LLM-dependent components
+### 4. Constructor injection for all LLM-dependent components (DONE)
 
-`Retriever.retrieve()` and `generator/__init__.py:generate()` create LLM
-clients internally. This makes testing harder and prevents config reuse.
+`Retriever` now strictly requires LLM via `__init__` (raises otherwise).
+`generator/__init__.py:generate()` accepts `llm=` and `config=` overrides.
 **All LLM-dependent components must accept the LLM via `__init__`, not create
 it inside method bodies.**
 
@@ -187,8 +184,55 @@ T11 only tested with fakes. **Each module that depends on another module's
 stateful API should have an integration test verifying the cross-module
 lifecycle.**
 
-### 7. Version-pin external services in docker-compose
+### 7. Version-in external services in docker-compose
 
 Memgraph CLI flags changed between versions. **Pin the Memgraph image version
 (e.g., `memgraph/memgraph:mage-2.12`) instead of `:latest` to avoid
 silent breakage.**
+
+## Completed improvements (gap closure)
+
+The following gaps were addressed:
+
+- **Feedback loop (E7)**: `FeedbackStore` now persists per-label features;
+  `scorer.calibration.apply_feedback_weights` reads labels and calibrates the
+  `WeightedRanker` weights at `Scorer` construction. `build_real_orchestrator`
+  injects the session `FeedbackStore` into the Scorer. The API `/feedback`
+  endpoint auto-attaches features from the run's `hypotheses.json`.
+- **External grounding (E8)**: `retriever/external.py` adds real HTTP-based
+  `citrination_search` and `nims_matnavi_search` (graceful degradation). Mode
+  `external_search` accepts comma-separated sources (`web,mp,citrination,nims`)
+  or legacy `web`/`web+mp`/`all`/`none`. UI exposes all four source checkboxes.
+- **Export formats (R-F12/F13/E6)**: added `export/pdf_writer.py` (reportlab),
+  `export/csv_writer.py`, `export/youtrack.py`. CLI `--format` supports
+  `json`/`docx`/`pdf`/`csv`; CLI `--jira`/`--youtrack` now perform real exports.
+  API `/export`, `/export/download`, `/export/jira`, `/export/youtrack` exposed.
+- **Example pre-made outputs (E1)**: `/examples` extracts and returns the
+  expert-authored hypothesis `.docx` text for each `Пример N`; the UI renders
+  it in an expander.
+- **KG schema config-driven (R-K4)**: `kg/schema.py` exposes
+  `DEFAULT_NODE_LABELS`/`DEFAULT_EDGE_TYPES`/`DEFAULT_DOMAIN_PATTERNS` and
+  `load_schema(path)` (YAML merge). `MVPConfig.kg_schema_path` selects a
+  domain YAML; `MemgraphKG` indexes/validates configured labels; `kg_build`
+  uses schema patterns. New domains connect without core rebuild.
+- **Dead-code purge**: removed unused `orchestrator/budget.py::BudgetEnforcer`
+  and `storage/memgraph_persist.py`; dropped the never-read
+  `MVPConfig.model_registry` field (the `ModelRegistry` class + its test remain).
+- **obs/redaction.py**: `redact_text` now substitutes source patterns (the
+  previous loop body was a no-op).
+- **API `/eval`**: now calls the real `obs.evals.run_evals` instead of
+  returning hardcoded metrics (per-run route `/runs/{run_id}/eval` plus a
+  backward-compatible `/sessions/{id}/eval` alias).
+- **Tests**: added `test_retriever/test_external.py`, `test_scorer/test_scorer_feedback_loop.py`,
+  `test_export/{test_csv,test_pdf,test_youtrack}.py`, `test_kg/test_schema.py`,
+  `test_session/test_manager.py`, `test_scorer/test_constraint_multilingual.py`,
+  `test_api/{test_examples,test_eval}.py`. Test count: 566.
+
+### Remaining future work (still open)
+
+- Memgraph integration tests via testcontainers/CI (item 1 above).
+- `temperature=0` is already set in `MVPConfig`; LLM response caching optional
+  for stronger determinism (item 5).
+- Cross-script constraint matching (RU-constraint vs EN-claim) has no synonym
+  bridge; same-script constraints are enforced. `LLMJudge` and the LLM gap
+  finder path are implemented but currently unused in the default wiring.

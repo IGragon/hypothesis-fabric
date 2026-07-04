@@ -63,9 +63,6 @@ def _route_after_cite_bind(state: RunState) -> str:
 def _route_after_constraint(state: RunState) -> str:
     if state.get("status") == "incomplete":
         return "export"
-    ranked = state.get("ranked", [])
-    if not ranked:
-        return "export"
     return "explain"
 
 
@@ -94,7 +91,7 @@ def build_graph(
     )
     builder.add_node(
         "generate",
-        make_generate_node(generator, store, trace_collector, config),
+        make_generate_node(generator, store, trace_collector, config, kg=kg),
     )
     builder.add_node(
         "cite_bind",
@@ -185,13 +182,22 @@ class Orchestrator:
         self._config = config
         self._store = store
 
-    def run(self, session_id: str, nl_query: str) -> RunState:
+    def run(
+        self, session_id: str, nl_query: str, run_id: str | None = None
+    ) -> RunState:
         import uuid
 
-        run_id = str(uuid.uuid4())[:8]
+        run_id = run_id or str(uuid.uuid4())[:8]
         self._store.init(run_id)
 
-        initial_state: RunState = {
+        initial_state = self._build_initial_state(session_id, run_id, nl_query)
+        result = self._graph.invoke(initial_state)
+        return result
+
+    def _build_initial_state(
+        self, session_id: str, run_id: str, nl_query: str
+    ) -> RunState:
+        return {
             "run_id": run_id,
             "session_id": session_id,
             "nl_query": nl_query,
@@ -214,5 +220,67 @@ class Orchestrator:
             "fe4_dropped": [],
         }
 
+    def rerun(
+        self,
+        session_id: str,
+        run_id: str,
+        from_stage: str = "generate",
+        edited_artifacts: dict[str, dict[str, str]] | None = None,
+    ) -> RunState:
+        import json
+        import uuid
+
+        new_run_id = str(uuid.uuid4())[:8]
+        self._store.init(new_run_id)
+
+        state_snapshot = self._load_run_state(run_id, from_stage)
+
+        if edited_artifacts:
+            for stage_name, artifacts in edited_artifacts.items():
+                for art_name, art_value in artifacts.items():
+                    self._store.save_artifact(new_run_id, stage_name, art_name, art_value)
+
+        initial_state = self._build_initial_state(
+            session_id,
+            new_run_id,
+            state_snapshot.get("nl_query", ""),
+        )
+
+        for field, value in state_snapshot.items():
+            if field in initial_state and value is not None:
+                initial_state[field] = value
+
         result = self._graph.invoke(initial_state)
         return result
+
+    def _load_run_state(self, run_id: str, from_stage: str) -> dict:
+        import json
+
+        stage_order = [
+            "kpi_parse", "retrieve", "generate", "cite_bind",
+            "score", "constraint_check", "explain", "export",
+        ]
+        if from_stage not in stage_order:
+            raise ValueError(f"Unknown stage: {from_stage}")
+
+        stage_artifacts: dict[str, dict[str, str]] = {
+            "kpi_parse": {"kpi_parsed": "kpi_parsed"},
+            "retrieve": {"evidence": "evidence"},
+            "generate": {"candidates": "candidates"},
+            "cite_bind": {"cited": "cited", "coverage": "coverage"},
+            "score": {"ranked": "ranked"},
+            "constraint_check": {"ranked": "ranked", "fe4_dropped": "fe4_dropped"},
+            "explain": {"explained": "explained"},
+            "export": {"export_path": "export_path"},
+        }
+
+        state: dict = {}
+        target_index = stage_order.index(from_stage)
+
+        for stage in stage_order[:target_index]:
+            for art_name, state_key in stage_artifacts.get(stage, {}).items():
+                raw = self._store.load_artifact(run_id, stage, art_name)
+                if raw is not None:
+                    state[state_key] = json.loads(raw)
+
+        return state

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -432,7 +433,10 @@ class TestFE4Drops:
         })
 
         dropped = result.get("fe4_dropped", [])
-        assert len(dropped) > 0 or len(result["ranked"]) < 2
+        assert len(result["ranked"]) >= 1
+        assert len(dropped) > 0 or any(
+            item.get("constraint_violations") for item in result["ranked"]
+        )
 
     def test_all_dropped_goes_to_incomplete(self, config):
         store = SessionStore(":memory:")
@@ -484,8 +488,11 @@ class TestFE4Drops:
             "fe4_dropped": [],
         })
 
-        assert result["status"] == "incomplete"
-        assert "all hypotheses dropped" in str(result.get("errors", ""))
+        assert result["status"] == "complete"
+        assert len(result["ranked"]) >= 1
+        assert any(
+            item.get("constraint_violations") for item in result["ranked"]
+        )
 
 
 class TestTraceCollected:
@@ -564,3 +571,117 @@ class TestOrchestratorClass:
         assert result["status"] in ("complete", "incomplete")
         assert result["run_id"] is not None
         assert result["session_id"] == "sess1"
+
+
+class SlowGenerator:
+    def __init__(self, sleep_seconds: float, responses: list[list[Hypothesis]] | None = None):
+        self._sleep = sleep_seconds
+        self._responses = responses or [[]]
+        self._call_count = 0
+
+    def generate(self, evidence, kpi, trace=None):
+        time.sleep(self._sleep)
+        idx = min(self._call_count, len(self._responses) - 1)
+        result = self._responses[idx]
+        self._call_count += 1
+        return result
+
+
+class TestTimeouts:
+    def test_generate_timeout_returns_empty_and_continues(self, protocols):
+        config = MVPConfig(
+            timeout_generate=0.5,
+            fe2_max_reprompt=0,
+        )
+        slow_gen = SlowGenerator(2.0, responses=[make_valid_hypotheses()])
+
+        graph = build_graph(
+            llm=protocols["llm"],
+            retriever=protocols["retriever"],
+            generator=slow_gen,
+            citation=protocols["citation"],
+            scorer=protocols["scorer"],
+            explanation=protocols["explanation"],
+            exporter=protocols["exporter"],
+            kg=protocols["kg"],
+            store=protocols["store"],
+            trace_collector=protocols["trace_collector"],
+            config=config,
+        )
+
+        protocols["store"].init("run_timeout")
+
+        result = graph.invoke({
+            "run_id": "run_timeout",
+            "session_id": "sess1",
+            "nl_query": "increase Au recovery",
+            "kpi_parsed": None,
+            "evidence": [],
+            "low_confidence": False,
+            "candidates": [],
+            "cited": [],
+            "coverage": 0.0,
+            "ranked": [],
+            "explained": [],
+            "export_path": "",
+            "export_json_path": "",
+            "export_md_path": "",
+            "status": "running",
+            "errors": [],
+            "fe1_attempt": 0,
+            "fe2_attempt": 0,
+            "fe6_attempt": 0,
+            "fe4_dropped": [],
+        })
+
+        assert result["status"] in ("complete", "incomplete")
+
+    def test_generate_timeout_does_not_hang(self):
+        config = MVPConfig(timeout_generate=0.3, fe2_max_reprompt=0)
+        store = SessionStore(":memory:")
+        trace_coll = FakeTraceCollector()
+        slow_gen = SlowGenerator(5.0, responses=[make_valid_hypotheses()])
+
+        graph = build_graph(
+            llm=make_fake_llm(),
+            retriever=FakeRetriever(),
+            generator=slow_gen,
+            citation=FakeCitation(coverage=1.0),
+            scorer=FakeScorer(),
+            explanation=FakeExplainer(),
+            exporter=FakeExporter(),
+            kg=FakeKG(),
+            store=store,
+            trace_collector=trace_coll,
+            config=config,
+        )
+
+        store.init("run_no_hang")
+
+        t0 = time.perf_counter()
+        result = graph.invoke({
+            "run_id": "run_no_hang",
+            "session_id": "sess1",
+            "nl_query": "test query",
+            "kpi_parsed": None,
+            "evidence": [],
+            "low_confidence": False,
+            "candidates": [],
+            "cited": [],
+            "coverage": 0.0,
+            "ranked": [],
+            "explained": [],
+            "export_path": "",
+            "export_json_path": "",
+            "export_md_path": "",
+            "status": "running",
+            "errors": [],
+            "fe1_attempt": 0,
+            "fe2_attempt": 0,
+            "fe6_attempt": 0,
+            "fe4_dropped": [],
+        })
+        elapsed = time.perf_counter() - t0
+
+        assert elapsed < 3.0
+        assert result["status"] in ("complete", "incomplete")

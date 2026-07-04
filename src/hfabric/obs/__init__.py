@@ -8,11 +8,14 @@ from hfabric.obs.evals import (
     schema_validity_check,
 )
 from hfabric.obs.logging import configure_logging, get_stage_logger
+from hfabric.obs.otel import OTelSpan, OTelTracer
 from hfabric.obs.traces import TraceCollector
 
 __all__ = [
     "configure_logging",
     "get_stage_logger",
+    "OTelSpan",
+    "OTelTracer",
     "TraceCollector",
     "jaccard_at_10",
     "schema_validity_check",

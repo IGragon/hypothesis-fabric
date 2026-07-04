@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
 from hfabric.config import MVPConfig
 from hfabric.retriever import Retriever
@@ -72,12 +73,12 @@ def test_full_pipeline(sample_kpi, fake_kg):
     llm = MagicMock()
     llm.invoke.return_value = FakeLLMResponse()
 
-    with patch("hfabric.retriever.vector.load_faiss", _fake_load_faiss), \
-         patch("hfabric.llm.create_chat_model", return_value=llm):
+    with patch("hfabric.retriever.vector.load_faiss", _fake_load_faiss):
         retriever = Retriever(
             embeddings=FakeEmbeddings(),
             kg=fake_kg,
             config=config,
+            llm=llm,
         )
         result = retriever.retrieve(sample_kpi, config, session_id="test_session")
 
@@ -98,13 +99,43 @@ def test_pipeline_merges_kb_and_session(sample_kpi):
     llm = MagicMock()
     llm.invoke.return_value = FakeLLMResponse()
 
-    with patch("hfabric.retriever.vector.load_faiss", _fake_load_faiss), \
-         patch("hfabric.llm.create_chat_model", return_value=llm):
+    with patch("hfabric.retriever.vector.load_faiss", _fake_load_faiss):
         retriever = Retriever(
             embeddings=FakeEmbeddings(),
             kg=kg,
             config=config,
+            llm=llm,
         )
         result = retriever.retrieve(sample_kpi, config, session_id="test_session")
 
     assert len(result["evidence"]) > 0
+
+
+class TestRetrieverLLMInjection:
+    def test_uses_injected_llm(self, sample_kpi, fake_kg):
+        config = MVPConfig()
+        llm = MagicMock()
+        llm.invoke.return_value = FakeLLMResponse()
+
+        with patch("hfabric.retriever.vector.load_faiss", _fake_load_faiss):
+            retriever = Retriever(
+                embeddings=FakeEmbeddings(),
+                kg=fake_kg,
+                config=config,
+                llm=llm,
+            )
+            result = retriever.retrieve(sample_kpi, config, session_id="test_session")
+
+        assert llm.invoke.called
+        assert len(result["evidence"]) > 0
+
+    def test_requires_llm_injection_without_silent_creation(self, sample_kpi, fake_kg):
+        config = MVPConfig()
+        with patch("hfabric.retriever.vector.load_faiss", _fake_load_faiss):
+            retriever = Retriever(
+                embeddings=FakeEmbeddings(),
+                kg=fake_kg,
+                config=config,
+            )
+            with pytest.raises(RuntimeError, match="LLM via constructor injection"):
+                retriever.retrieve(sample_kpi, config, session_id="test_session")

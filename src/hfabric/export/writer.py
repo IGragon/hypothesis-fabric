@@ -2,8 +2,31 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from hfabric.schemas import RunResult
+
+
+def _linkify(text: str, cited_refs: dict) -> str:
+    if not text:
+        return text
+
+    def repl(m: "re.Match") -> str:
+        marker = m.group(1).strip()
+        chunk = cited_refs.get(marker)
+        url = None
+        if chunk is not None:
+            url = chunk.meta.get("url")
+        else:
+            for c in cited_refs.values():
+                if c.meta.get("url") == marker:
+                    url = marker
+                    break
+        if url:
+            return f"[[{marker}]]({url})"
+        return f"[{marker}]"
+
+    return re.sub(r"\[([^\]\n]+)\]", repl, text)
 
 
 def write_export(result: RunResult, session_id: str) -> tuple[str, str]:
@@ -32,6 +55,8 @@ def _build_report_md(result: RunResult) -> str:
     lines.append(f"**Query:** {result.query}")
     lines.append(f"**Run ID:** {result.run_id}")
     lines.append(f"**Status:** {result.status}")
+    for note in result.notes:
+        lines.append(f"**Note:** {note}")
     lines.append("")
 
     kpi = result.kpi.kpi
@@ -65,6 +90,18 @@ def _build_report_md(result: RunResult) -> str:
 
         lines.append(f"### #{rank}. {h.claim} (Score: {score:.2f})")
         lines.append("")
+
+        violations = features.get("violation_count", 0)
+        if eh.constraint_violations:
+            lines.append(f"**⚠ Нарушения ограничений:** {len(eh.constraint_violations)}")
+            lines.append("")
+            for v in eh.constraint_violations:
+                lines.append(f"- {v}")
+            lines.append("")
+        elif violations > 0:
+            lines.append(f"**⚠ Нарушения ограничений:** {int(violations)} (штраф применён к оценке)")
+            lines.append("")
+
         lines.append(f"**Mechanism:** {h.mechanism}")
         lines.append(f"**Expected Effect:** {h.expected_effect}")
         lines.append("")
@@ -72,24 +109,61 @@ def _build_report_md(result: RunResult) -> str:
         lines.append("| Feature | Value |")
         lines.append("|---------|-------|")
         for fname, fval in features.items():
-            lines.append(f"| {fname} | {fval:.2f} |")
+            if isinstance(fval, float):
+                lines.append(f"| {fname} | {fval:.2f} |")
+            else:
+                lines.append(f"| {fname} | {fval} |")
         lines.append("")
 
         cited_refs = eh.scored.cited_refs
-        if cited_refs:
-            lines.append("**Evidence:**")
+
+        def lk(text: str) -> str:
+            return _linkify(text, cited_refs)
+
+        lines.append(f"**Justification:** {lk(eh.justification)}")
+        lines.append("")
+        lines.append(f"**Novelty:** {lk(eh.novelty)}")
+        lines.append(f"**Risks:** {lk(eh.risks)}")
+        lines.append(f"**Why it matters (value / KPI):** {lk(eh.why_it_matters)}")
+        lines.append("")
+
+        if eh.effect_cause_examples:
+            lines.append("**Effect–cause examples:**")
             lines.append("")
-            for chunk in cited_refs.values():
-                lines.append(f"> {chunk.text}")
-                lines.append("")
-        else:
-            lines.append("**Evidence:** None")
+            for ex in eh.effect_cause_examples:
+                lines.append(f"- {lk(ex)}")
             lines.append("")
 
-        lines.append(f"**Justification:** {eh.justification}")
-        lines.append(f"**Uncertainty:** {eh.uncertainty}")
-        lines.append(f"**Verification Plan:** {eh.verification_plan}")
+        lines.append(f"**General approach:** {lk(eh.general_approach)}")
         lines.append("")
+        lines.append(f"**What to do now:** {lk(eh.actionable_now)}")
+        lines.append("")
+        lines.append(f"**Existing best practices:** {lk(eh.best_practices)}")
+        lines.append("")
+        lines.append(f"**Uncertainty:** {lk(eh.uncertainty)}")
+        lines.append(f"**Verification plan (roadmap):** {lk(eh.verification_plan)}")
+        lines.append("")
+
+        if cited_refs:
+            lines.append("**Evidence / Sources:**")
+            lines.append("")
+            for cid, chunk in cited_refs.items():
+                url = chunk.meta.get("url")
+                if url:
+                    title = chunk.meta.get("title") or url
+                    lines.append(f"- `[{cid}]` [{title}]({url})")
+                else:
+                    doc = chunk.meta.get("doc_id", chunk.doc_id or "")
+                    src = f" — _{doc}_" if doc else ""
+                    lines.append(f"- `[{cid}]`{src}: {chunk.text[:280]}")
+            lines.append("")
+        else:
+            lines.append("**Evidence / Sources:** None")
+            lines.append("")
+
+        if eh.external_urls:
+            lines.append(f"**External sources cited:** {len(eh.external_urls)}")
+            lines.append("")
 
         neighbourhood = eh.graph_neighbourhood
         if neighbourhood:

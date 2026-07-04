@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Фабрика гипотез</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">ФГ</div>
+        <div class="brand-copy">
+          <strong>Фабрика гипотез</strong>
+          <span>Генерация и ранжирование гипотез для НИИ и обогатительных фабрик</span>
+        </div>
+      </div>
+
+      <div class="top-actions">
+        <div class="run-state" id="runState">
+          <span class="pulse"></span>
+          <span>готов к запуску</span>
+        </div>
+        <button class="ghost-btn" id="helpBtn" type="button" data-tip="Открыть короткую инструкцию по интерфейсу">Инструкция</button>
+        <button class="ghost-btn" id="focusBtn" type="button" data-tip="Скрыть боковые панели и красиво раскрыть холст">Фокус</button>
+        <button class="ghost-btn" id="fitBtn" type="button" data-tip="Вписать все видимые карточки в область холста">Вписать</button>
+
+        <div class="export-wrap">
+          <button class="ghost-btn" id="exportBtn" type="button" data-tip="Скачать отчёт в выбранном формате">Экспорт</button>
+          <div class="export-popover" id="exportPopover">
+            <button data-fmt="md">📄 Markdown (.md)</button>
+            <button data-fmt="json">🗂 JSON</button>
+            <button data-fmt="docx">📝 Word (.docx)</button>
+            <button data-fmt="pdf">📕 PDF (.pdf)</button>
+            <button data-fmt="csv">📊 CSV (.csv)</button>
+            <div class="sep"></div>
+            <button data-fmt="jira">📤 Экспорт в Jira</button>
+            <button data-fmt="youtrack">📤 Экспорт в YouTrack</button>
+          </div>
+        </div>
+
+        <button class="primary-btn" id="generateBtn" type="button" data-tip="Запустить пайплайн генерации гипотез">Запустить анализ</button>
+      </div>
+    </header>
+
+    <aside class="left-panel">
+      <section class="panel-block">
+        <div class="block-head">
+          <h2>Запуск анализа</h2>
+          <span class="chip green" id="runChip">онлайн</span>
+        </div>
+
+        <label class="field">
+          <span>Технологическая проблема / целевое свойство</span>
+          <textarea id="goalInput" rows="3" placeholder="напр. повысить извлечение Au при флотации на 5% без увеличения расхода цианида"></textarea>
+        </label>
+
+        <label class="field">
+          <span>Ограничения (сырьё, бюджет, оборудование, нормативы)</span>
+          <textarea id="constraintsInput" rows="3" placeholder="напр. доступное сырьё: ксантанат; бюджет ограничен; без CN"></textarea>
+        </label>
+      </section>
+
+      <section class="panel-block">
+        <div class="block-head">
+          <h2>Веса ранжирования</h2>
+          <button class="mini-btn" id="resetWeightsBtn" type="button" data-tip="Вернуть веса по умолчанию">сброс</button>
+        </div>
+
+        <label class="range-row">
+          <span>Эффект (KPI)</span>
+          <input id="weight_effect" type="range" min="0" max="100" value="25">
+          <b id="weight_effectValue">25</b>
+        </label>
+        <label class="range-row">
+          <span>Реализуемость</span>
+          <input id="weight_feasibility" type="range" min="0" max="100" value="30">
+          <b id="weight_feasibilityValue">30</b>
+        </label>
+        <label class="range-row">
+          <span>Новизна</span>
+          <input id="weight_novelty" type="range" min="0" max="100" value="25">
+          <b id="weight_noveltyValue">25</b>
+        </label>
+        <label class="range-row">
+          <span>Риски</span>
+          <input id="weight_risk" type="range" min="0" max="100" value="10">
+          <b id="weight_riskValue">10</b>
+        </label>
+        <label class="range-row">
+          <span>Осуществимость</span>
+          <input id="weight_realizability" type="range" min="0" max="100" value="10">
+          <b id="weight_realizabilityValue">10</b>
+        </label>
+      </section>
+
+      <section class="panel-block">
+        <div class="block-head">
+          <h2>Внешние источники</h2>
+          <span class="chip">grounding</span>
+        </div>
+        <label class="check-row">
+          <input type="checkbox" id="src_web" checked>
+          <span>Веб-поиск (DuckDuckGo)</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" id="src_mp">
+          <span>Materials Project</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" id="src_citrination">
+          <span>Citrination</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" id="src_nims">
+          <span>NIMS MatNavi</span>
+        </label>
+      </section>
+
+      <section class="panel-block">
+        <div class="block-head">
+          <h2>Источники (база знаний)</h2>
+          <span class="chip" id="sourceCount">0 файлов</span>
+        </div>
+        <div class="drop-zone" id="dropZone" data-tip="Перетащите PDF, XLSX, DOCX, PNG с компьютера">
+          <strong>Перетащите файлы или нажмите</strong>
+          <span>PDF · XLSX · DOCX · PNG · JPG</span>
+          <input type="file" id="fileInput" multiple accept=".pdf,.xlsx,.docx,.png,.jpg,.jpeg,.bmp,.tiff,.webp" hidden>
+        </div>
+        <div class="source-stack" id="sourceStack"></div>
+      </section>
+
+      <section class="panel-block">
+        <div class="block-head">
+          <h2>Примеры готовых выводов</h2>
+          <span class="chip cyan" id="examplesChip">демо</span>
+        </div>
+        <div class="examples-list" id="examplesList">
+          <em style="color:#8a93a6;font-size:12px">загрузка…</em>
+        </div>
+      </section>
+    </aside>
+
+    <div class="column-resizer left-resizer" id="leftResizer" data-side="left" data-tip="Потяните, чтобы изменить ширину левой колонки"></div>
+
+    <main class="workspace">
+      <section class="command-strip">
+        <div class="search-box" data-tip="Фильтрует узлы холста по названию и описанию. Горячая клавиша: /">
+          <span>/</span>
+          <input id="searchInput" placeholder="поиск по гипотезам, источникам">
+        </div>
+        <div class="filter-tabs" id="filterTabs">
+          <button class="active" data-filter="all" type="button">Все</button>
+          <button data-filter="hypothesis" type="button">Гипотезы</button>
+          <button data-filter="source" type="button">Источники</button>
+          <button data-filter="experiment" type="button">Эксперименты</button>
+          <button data-filter="risk" type="button">Риски</button>
+        </div>
+      </section>
+
+      <section class="hero-metrics" id="heroMetrics"></section>
+
+      <section class="canvas-stage" id="canvasStage">
+        <div class="canvas-toolbar" aria-label="Управление холстом">
+          <button class="canvas-tool" id="zoomOutBtn" type="button">−</button>
+          <span id="zoomValue">100%</span>
+          <button class="canvas-tool" id="zoomInBtn" type="button">+</button>
+          <button class="canvas-tool" id="clearCanvasBtn" type="button" data-tip="Удалить все карточки с холста">🗑</button>
+        </div>
+        <div class="canvas-space" id="canvasSpace">
+          <div class="canvas-grid" id="canvasGrid">
+            <svg class="edge-layer" id="edgeLayer" aria-hidden="true"></svg>
+            <div class="nodes-layer" id="nodesLayer"></div>
+            <div class="canvas-empty" id="canvasEmpty">
+              <strong>Холст пуст</strong>
+              Заполните проблему и ограничения, добавьте файлы базы знаний
+              и нажмите «Запустить анализ».
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div class="column-resizer right-resizer" id="rightResizer" data-side="right" data-tip="Потяните, чтобы изменить ширину правой колонки"></div>
+
+    <aside class="right-panel" id="rightPanel">
+      <section class="inspector-card">
+        <div class="inspector-top">
+          <span class="chip cyan" id="selectedKind">—</span>
+          <button class="mini-btn" id="pinBtn" type="button" data-tip="Закрепить выбранную гипотезу в плане проверки">в план</button>
+        </div>
+        <h2 id="selectedTitle">Выберите гипотезу</h2>
+        <p id="selectedSummary"></p>
+
+        <div class="score-ring">
+          <div class="score-number" id="selectedScore">—</div>
+          <div>
+            <strong>интегральная оценка</strong>
+            <span id="selectedConfidence"></span>
+          </div>
+        </div>
+
+        <div class="metric-bars" id="metricBars"></div>
+      </section>
+
+      <section class="inspector-block">
+        <h3>Механизм влияния</h3>
+        <p id="mechanismText" class="soft-text"></p>
+      </section>
+      <section class="inspector-block">
+        <h3>Обоснование</h3>
+        <p id="justificationText" class="soft-text"></p>
+      </section>
+      <section class="inspector-block">
+        <h3>Ожидаемый эффект</h3>
+        <p id="expectedEffectText" class="soft-text"></p>
+      </section>
+      <section class="inspector-block">
+        <h3>Почему важно (KPI / ценность)</h3>
+        <p id="whyItMattersText" class="soft-text"></p>
+      </section>
+      <section class="inspector-block">
+        <h3>Лучшие практики</h3>
+        <p id="bestPracticesText" class="soft-text"></p>
+      </section>
+      <section class="inspector-block">
+        <h3>Что сделать здесь и сейчас</h3>
+        <p id="actionableNowText" class="soft-text"></p>
+      </section>
+      <section class="inspector-block">
+        <h3>Новизна</h3>
+        <p id="noveltyText" class="soft-text"></p>
+      </section>
+      <section class="inspector-block">
+        <h3>Риски</h3>
+        <p id="risksText" class="soft-text"></p>
+      </section>
+      <section class="inspector-block">
+        <h3>Неопределённость и верификация</h3>
+        <p id="uncertaintyText" class="soft-text"></p>
+      </section>
+      <section class="inspector-block">
+        <h3>Примеры эффект-причина</h3>
+        <ul id="effectCauseList"></ul>
+      </section>
+      <section class="inspector-block">
+        <h3>Доказательства</h3>
+        <div class="evidence-list" id="evidenceList"></div>
+      </section>
+      <section class="inspector-block">
+        <h3>Дорожная карта проверки</h3>
+        <div class="roadmap" id="roadmapList"></div>
+      </section>
+      <section class="inspector-block constraint-warnings" id="constraintWarningsBlock">
+        <h3>⚠ Предупреждения: несоответствие ограничениям</h3>
+        <ul class="constraint-warnings-list" id="constraintWarnings"></ul>
+      </section>
+      <section class="inspector-block">
+        <h3>Решение эксперта</h3>
+        <div class="block-head" style="margin-bottom:8px">
+          <span class="chip amber" id="decisionState">на ревью</span>
+        </div>
+        <div class="decision-grid">
+          <button class="decision approve" id="approveBtn" type="button">Принять</button>
+          <button class="decision reject" id="rejectBtn" type="button">Отклонить</button>
+        </div>
+        <button class="spin-btn" id="adjustBtn" type="button" style="margin-top:8px;width:100%">Скорректировать</button>
+      </section>
+    </aside>
+
+    <footer class="rank-panel">
+      <div class="rank-head">
+        <h2>Рейтинг гипотез</h2>
+        <span id="rankCount">0 гипотез</span>
+      </div>
+      <div class="rank-list" id="rankList"></div>
+    </footer>
+  </div>
+
+  <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+  <div class="tooltip-layer" id="tooltipLayer" role="tooltip"></div>
+
+  <div class="modal-backdrop hidden" id="helpModal" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+    <section class="help-modal">
+      <div class="help-head">
+        <div>
+          <span class="chip cyan">инструкция</span>
+          <h2 id="helpTitle">Как пользоваться</h2>
+        </div>
+        <button class="ghost-btn" id="closeHelpBtn" type="button">Закрыть</button>
+      </div>
+      <div class="help-grid">
+        <article>
+          <b>1. Опишите задачу</b>
+          <p>Слева укажите технологическую проблему, ограничения и загрузите файлы базы знаний.</p>
+        </article>
+        <article>
+          <b>2. Настройте ранжирование</b>
+          <p>Задайте веса критериям (эффект, реализуемость, новизна, риски) и включите внешние источники данных.</p>
+        </article>
+        <article>
+          <b>3. Запустите анализ</b>
+          <p>Кнопка «Запустить анализ» запускает пайплайн. Прогресс по 8 этапам показывается в окне.</p>
+        </article>
+        <article>
+          <b>4. Изучайте гипотезы</b>
+          <p>Карточки на холсте — сгенерированные гипотезы. Справа — обоснование, риски, неопределённость, дорожная карта.</p>
+        </article>
+        <article>
+          <b>5. Оценивайте и экспортируйте</b>
+          <p>Принять/Отклонить/Скорректировать обучает систему (фидбек). Экспорт — в MD/JSON/DOCX/PDF/CSV, Jira, YouTrack.</p>
+        </article>
+      </div>
+    </section>
+  </div>
+
+  <div class="modal-backdrop hidden" id="exampleModal" role="dialog" aria-modal="true" aria-labelledby="exampleModalTitle">
+    <section class="help-modal" style="max-width:680px">
+      <div class="help-head">
+        <div>
+          <span class="chip cyan">пример</span>
+          <h2 id="exampleModalTitle">Пример готового вывода</h2>
+        </div>
+        <button class="ghost-btn" id="closeExampleBtn" type="button">Закрыть</button>
+      </div>
+      <pre id="exampleBody" style="white-space:pre-wrap;font-family:inherit;font-size:13px;line-height:1.5;max-height:60vh;overflow:auto"></pre>
+    </section>
+  </div>
+
+  <div class="modal-backdrop hidden" id="progressModal" role="dialog" aria-modal="true">
+    <section class="progress-modal">
+      <div class="progress-head">
+        <h2>Генерация гипотез…</h2>
+        <span class="progress-percent" id="progressPercent">0%</span>
+      </div>
+      <div class="progress-bar"><div id="progressFill" style="width:0%"></div></div>
+      <div class="stage-list" id="stageList"></div>
+      <div class="progress-elapsed" id="progressElapsed"></div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

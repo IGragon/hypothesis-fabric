@@ -151,3 +151,97 @@ class TestBindClaims:
         assert len(scored) == 1
         assert "chunk_003" in scored[0].cited_refs
         assert coverage == 1.0
+
+
+RU_CHUNK_1 = EvidenceChunk(
+    chunk_id="chunk_ru_001",
+    doc_id="doc_ru_1",
+    text="Применение ксантогенатных собирателей увеличивает извлечение золота на 5-10% при флотации упорных руд.",
+    meta={"source": "kb", "page": 1},
+)
+RU_CHUNK_2 = EvidenceChunk(
+    chunk_id="chunk_ru_002",
+    doc_id="doc_ru_1",
+    text="Цианид натрия часто используется как депрессор во флотационных циклах для снижения извлечения пирротина.",
+    meta={"source": "kb", "page": 2},
+)
+RU_CHUNK_3 = EvidenceChunk(
+    chunk_id="chunk_ru_003",
+    doc_id="doc_ru_2",
+    text="Сульфид натрия может активировать окисленные золотосодержащие руды при флотации.",
+    meta={"source": "kb", "page": 3},
+)
+
+
+class TestMultilingualCitation:
+    def test_russian_claim_matches_russian_chunk(self):
+        hyp = Hypothesis(
+            claim="Добавление ксантогенатного собирателя повышает извлечение золота",
+            mechanism="Ксантогенаты хемосорбируются на поверхности золота",
+            expected_effect="+5-10% извлечения Au",
+            evidence_refs=["chunk_ru_001"],
+        )
+        cmap = {"chunk_ru_001": RU_CHUNK_1}
+        scored, coverage = bind_claims([hyp], cmap, threshold=55.0)
+
+        assert "chunk_ru_001" in scored[0].cited_refs
+        assert coverage > 0.0
+
+    def test_english_claim_russian_chunk_cross_script(self):
+        hyp = Hypothesis(
+            claim="Xanthate collector addition increases Au recovery in flotation",
+            mechanism="Xanthates chemisorb on gold surfaces",
+            expected_effect="+5-10% Au recovery",
+            evidence_refs=["chunk_ru_001"],
+        )
+        cmap = {"chunk_ru_001": RU_CHUNK_1}
+        scored, coverage = bind_claims([hyp], cmap, threshold=55.0)
+
+        assert "chunk_ru_001" in scored[0].cited_refs
+        assert coverage == 1.0
+
+    def test_chunk_not_in_evidence_refs_not_matched(self):
+        hyp = Hypothesis(
+            claim="Добавление цианида снижает извлечение золота",
+            mechanism="Цианид депрессирует золото",
+            expected_effect="-5% извлечения",
+            evidence_refs=["chunk_ru_001"],
+        )
+        cmap = {"chunk_ru_002": RU_CHUNK_2}
+        scored, coverage = bind_claims([hyp], cmap, threshold=55.0)
+
+        assert "chunk_ru_001" not in scored[0].cited_refs
+        assert coverage == 0.0
+
+    def test_mixed_language_hypotheses_coverage(self):
+        h1 = Hypothesis(
+            claim="Добавление ксантогенатного собирателя повышает извлечение золота",
+            mechanism="Ксантогенаты хемосорбируются",
+            expected_effect="+5-10% Au",
+            evidence_refs=["chunk_ru_001"],
+        )
+        h2 = Hypothesis(
+            claim="Sodium sulphide pre-treatment activates oxidized gold",
+            mechanism="Sulphidization forms hydrophobic layer",
+            expected_effect="+3-7% Au recovery",
+            evidence_refs=["chunk_ru_003"],
+        )
+        cmap = {"chunk_ru_001": RU_CHUNK_1, "chunk_ru_003": RU_CHUNK_3}
+        scored, coverage = bind_claims([h1, h2], cmap, threshold=55.0)
+
+        assert len(scored) == 2
+        assert "chunk_ru_001" in scored[0].cited_refs
+        assert "chunk_ru_003" in scored[1].cited_refs
+        assert coverage == 1.0
+
+    def test_russian_claim_unrelated_chunk_not_matched(self):
+        hyp = Hypothesis(
+            claim="Квантовая запутанность улучшает стабильность пены",
+            mechanism="Запутанные частицы снижают поверхностное натяжение",
+            expected_effect="+100% извлечения",
+            evidence_refs=["chunk_ru_001"],
+        )
+        cmap = {"chunk_ru_001": RU_CHUNK_1}
+        scored, coverage = bind_claims([hyp], cmap, threshold=55.0)
+
+        assert coverage == 0.0

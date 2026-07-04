@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import threading
 import time
 import uuid
 from typing import Any, Callable
@@ -28,6 +30,13 @@ from hfabric.schemas import (
 from hfabric.storage.session_store import SessionStore
 
 RunState = dict[str, Any]
+
+_log = logging.getLogger("hfabric.orchestrator")
+
+
+def _slog(run_id: str, stage: str, msg: str, *args, level: int = logging.INFO) -> None:
+    formatted = msg % args if args else msg
+    logging.getLogger(f"hfabric.{stage}").log(level, "[%s] %s", run_id[:8], formatted)
 
 
 def _serialize_hypothesis(h: Hypothesis) -> dict:
@@ -67,23 +76,15 @@ def _deserialize_scored(d: dict) -> ScoredHypothesis:
 
 
 def _serialize_explained(e: ExplainedHypothesis) -> dict:
-    return {
-        "scored": _serialize_scored(e.scored),
-        "justification": e.justification,
-        "uncertainty": e.uncertainty,
-        "verification_plan": e.verification_plan,
-        "graph_neighbourhood": e.graph_neighbourhood,
-    }
+    d = e.model_dump()
+    d["scored"] = _serialize_scored(e.scored)
+    return d
 
 
 def _deserialize_explained(d: dict) -> ExplainedHypothesis:
-    return ExplainedHypothesis(
-        scored=_deserialize_scored(d["scored"]),
-        justification=d["justification"],
-        uncertainty=d["uncertainty"],
-        verification_plan=d["verification_plan"],
-        graph_neighbourhood=d["graph_neighbourhood"],
-    )
+    payload = dict(d)
+    payload["scored"] = _deserialize_scored(d["scored"])
+    return ExplainedHypothesis(**payload)
 
 
 def _make_trace(
@@ -101,6 +102,29 @@ def _short_circuit(state: RunState) -> dict | None:
     return None
 
 
+def _with_timeout(func, timeout_seconds: float, on_timeout_value=None):
+    result = [None]
+    exception = [None]
+
+    def target():
+        try:
+            result[0] = func()
+        except Exception as e:
+            exception[0] = e
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+
+    if thread.is_alive():
+        return on_timeout_value
+
+    if exception[0] is not None:
+        raise exception[0]
+
+    return result[0]
+
+
 def make_kpi_parse_node(
     llm: Any,
     store: SessionStore,
@@ -116,13 +140,21 @@ def make_kpi_parse_node(
 
         t0 = time.perf_counter()
         try:
-            structured = llm.with_structured_output(KPIParsed, method="json_schema")
+            structured = llm.with_structured_output(KPIParsed, method="function_calling")
             prompt = (
-                f"Parse the following research goal into structured KPI data:\n\n"
-                f"Goal: {state['nl_query']}\n\n"
-                f"Extract the main metric, direction (increase/decrease), "
-                f"target value, constraints, and language."
+                f"Разберите следующую исследовательскую задачу в структурированные данные KPI:\n\n"
+                f"Задача: {state['nl_query']}\n\n"
+                f"Извлеките:\n"
+                f"- metric: основной показатель (метрика), который нужно изменить\n"
+                f"- direction: increase или decrease (увеличить/снизить)\n"
+                f"- target: целевое значение, если указано (иначе null)\n"
+                f"- constraints: список ограничений (оборудование, бюджет, нормативы и т.п.), "
+                f"каждое как отдельный элемент списка\n"
+                f"- language: язык задачи (ru для русского, en для английского)\n\n"
+                f"Отвечайте на языке задачи. Ограничения разделяйте по запятым или точкам с запятой, "
+                f"но каждое ограничение — отдельный элемент массива."
             )
+            _slog(run_id, "kpi_parse", "start: query=%r", state.get("nl_query", "")[:80])
             result: KPIParsed = structured.invoke(prompt)
             latency_ms = (time.perf_counter() - t0) * 1000
 
@@ -135,6 +167,15 @@ def make_kpi_parse_node(
 
             store.save_artifact(run_id, "kpi_parse", "kpi_parsed", kpi_dict_json)
             store.set_stage_state(run_id, "kpi_parse", "done")
+            _slog(
+                run_id, "kpi_parse",
+                "done: metric=%r direction=%s constraints=%d lang=%s (%.0fms)",
+                kpi_dict.get("kpi", {}).get("metric", ""),
+                kpi_dict.get("kpi", {}).get("direction", ""),
+                len(kpi_dict.get("constraints", [])),
+                kpi_dict.get("language", ""),
+                latency_ms,
+            )
             trace_collector.record(
                 run_id, "kpi_parse", slot="kpi_parse",
                 token_in=trace.token_in, token_out=trace.token_out,
@@ -151,6 +192,7 @@ def make_kpi_parse_node(
                 run_id, "kpi_parse", slot="kpi_parse",
                 token_in=0, token_out=0, latency_ms=latency_ms, status="error",
             )
+            _slog(run_id, "kpi_parse", "FAILED: %s", exc, level=logging.ERROR)
 
             errors = state.get("errors", [])
             errors.append(f"kpi_parse failed: {exc}")
@@ -181,6 +223,7 @@ def make_retrieve_node(
         kpi = KPIParsed(**kpi_dict)
         t0 = time.perf_counter()
         try:
+            _slog(run_id, "retrieve", "start: KB query=%r", kpi.goal[:80])
             result = retriever.retrieve(kpi, config, session_id)
             latency_ms = (time.perf_counter() - t0) * 1000
 
@@ -197,6 +240,11 @@ def make_retrieve_node(
                 token_in=0, token_out=len(evidence_serialized),
                 latency_ms=latency_ms, status="ok",
             )
+            _slog(
+                run_id, "retrieve",
+                "done: %d KB chunks (low_confidence=%s, %.0fms)",
+                len(evidence_serialized), low_confidence, latency_ms,
+            )
 
             return {
                 "evidence": evidence_serialized,
@@ -209,6 +257,7 @@ def make_retrieve_node(
                 run_id, "retrieve", slot="retrieve",
                 token_in=0, token_out=0, latency_ms=latency_ms, status="error",
             )
+            _slog(run_id, "retrieve", "FAILED: %s", exc, level=logging.ERROR)
             errors = state.get("errors", [])
             errors.append(f"retrieve failed: {exc}")
             return {"evidence": [], "low_confidence": True, "errors": errors}
@@ -221,6 +270,7 @@ def make_generate_node(
     store: SessionStore,
     trace_collector: TraceCollector,
     config: MVPConfig,
+    kg: KGProtocol | None = None,
 ) -> Callable:
     def generate_node(state: RunState, runtime_config: dict | None = None) -> dict:
         run_id = state["run_id"]
@@ -241,21 +291,32 @@ def make_generate_node(
 
         if not evidence:
             store.set_stage_state(run_id, "generate", "done")
+            _slog(run_id, "generate", "skip: no evidence")
             return {"candidates": []}
 
         t0 = time.perf_counter()
         try:
-            hypotheses: list[Hypothesis] = generator.generate(evidence, kpi, trace)
+            def _do_generate():
+                return generator.generate(evidence, kpi, trace)
+
+            _slog(run_id, "generate", "start: %d evidence chunks, fe2_attempt=%d", len(evidence), fe2_attempt)
+            hypotheses: list[Hypothesis] = _with_timeout(
+                _do_generate,
+                config.timeout_generate,
+                [],
+            )
             latency_ms = (time.perf_counter() - t0) * 1000
 
             if not hypotheses:
                 if fe2_attempt < config.fe2_max_reprompt:
                     store.set_stage_state(run_id, "generate", "running")
+                    _slog(run_id, "generate", "FE2 retry %d/%d", fe2_attempt + 1, config.fe2_max_reprompt, level=logging.WARNING)
                     return {
                         "fe2_attempt": fe2_attempt + 1,
                         "candidates": [],
                     }
                 store.set_stage_state(run_id, "generate", "incomplete", "FE2 exhausted")
+                _slog(run_id, "generate", "FE2 EXHAUSTED: no valid hypotheses", level=logging.ERROR)
                 errors = state.get("errors", [])
                 errors.append("generate: FE2 exhausted, no valid hypotheses")
                 return {
@@ -265,7 +326,19 @@ def make_generate_node(
                     "fe2_attempt": fe2_attempt + 1,
                 }
 
-            serialized = [_serialize_hypothesis(h) for h in hypotheses]
+            all_hypotheses = list(hypotheses)
+            if kg is not None:
+                try:
+                    from hfabric.generator.gap_finder import GapFinder
+                    gf = GapFinder(kg)
+                    gaps = gf.find_gaps(kpi, evidence)
+                    if gaps:
+                        gap_hyps = gf.generate(gaps, evidence, kpi, llm=None)
+                        all_hypotheses.extend(gap_hyps)
+                except Exception:
+                    pass
+
+            serialized = [_serialize_hypothesis(h) for h in all_hypotheses]
             store.save_artifact(
                 run_id, "generate", "candidates", json.dumps(serialized)
             )
@@ -274,6 +347,11 @@ def make_generate_node(
                 run_id, "generate", slot="synthesizer",
                 token_in=trace.token_in, token_out=trace.token_out,
                 latency_ms=latency_ms, status=trace.status,
+            )
+            _slog(
+                run_id, "generate",
+                "done: %d hypotheses (%.0fms)",
+                len(all_hypotheses), latency_ms,
             )
 
             return {
@@ -287,6 +365,7 @@ def make_generate_node(
                 run_id, "generate", slot="synthesizer",
                 token_in=0, token_out=0, latency_ms=latency_ms, status="error",
             )
+            _slog(run_id, "generate", "FAILED: %s", exc, level=logging.ERROR)
             errors = state.get("errors", [])
             errors.append(f"generate failed: {exc}")
             return {"candidates": [], "errors": errors}
@@ -317,6 +396,7 @@ def make_cite_bind_node(
 
         t0 = time.perf_counter()
         try:
+            _slog(run_id, "cite_bind", "start: %d hypotheses", len(hypotheses))
             scored_list, coverage = citation.bind(hypotheses, chunks_map)
             latency_ms = (time.perf_counter() - t0) * 1000
 
@@ -333,6 +413,12 @@ def make_cite_bind_node(
                     token_in=0, token_out=len(serialized),
                     latency_ms=latency_ms, status="ok",
                 )
+                _slog(
+                    run_id, "cite_bind",
+                    "FE6 retry %d/%d: coverage=%.2f < min=%.2f",
+                    fe6_attempt + 1, config.fe6_max_cite_regenerate, coverage, config.citation_coverage_min,
+                    level=logging.WARNING,
+                )
                 return {
                     "cited": serialized,
                     "coverage": coverage,
@@ -344,6 +430,11 @@ def make_cite_bind_node(
                 run_id, "cite_bind", slot="citation",
                 token_in=0, token_out=len(serialized),
                 latency_ms=latency_ms, status="ok",
+            )
+            _slog(
+                run_id, "cite_bind",
+                "done: %d cited, coverage=%.2f (%.0fms)",
+                len(serialized), coverage, latency_ms,
             )
 
             return {
@@ -358,6 +449,7 @@ def make_cite_bind_node(
                 run_id, "cite_bind", slot="citation",
                 token_in=0, token_out=0, latency_ms=latency_ms, status="error",
             )
+            _slog(run_id, "cite_bind", "FAILED: %s", exc, level=logging.ERROR)
             errors = state.get("errors", [])
             errors.append(f"cite_bind failed: {exc}")
             return {"cited": [], "coverage": 0.0, "errors": errors}
@@ -397,6 +489,7 @@ def make_score_node(
 
         t0 = time.perf_counter()
         try:
+            _slog(run_id, "score", "start: %d hypotheses", len(hypotheses))
             ranked = scorer.score(hypotheses, chunks, kpi, scorer.kg, config)
             latency_ms = (time.perf_counter() - t0) * 1000
 
@@ -430,6 +523,13 @@ def make_score_node(
                 token_in=0, token_out=len(serialized),
                 latency_ms=latency_ms, status="ok",
             )
+            if _log.isEnabledFor(logging.DEBUG) and merged:
+                breakdown = ", ".join(
+                    f"{m.hypothesis.claim[:30]}={m.score:.3f}" for m in merged
+                )
+                _slog(run_id, "score", "ranks: %s", breakdown, level=logging.DEBUG)
+            else:
+                _slog(run_id, "score", "done: %d ranked (%.0fms)", len(merged), latency_ms)
 
             return {"ranked": serialized}
         except Exception as exc:
@@ -439,6 +539,7 @@ def make_score_node(
                 run_id, "score", slot="scorer",
                 token_in=0, token_out=0, latency_ms=latency_ms, status="error",
             )
+            _slog(run_id, "score", "FAILED: %s", exc, level=logging.ERROR)
             errors = state.get("errors", [])
             errors.append(f"score failed: {exc}")
             return {"ranked": [], "errors": errors}
@@ -469,35 +570,28 @@ def make_constraint_check_node(
         from hfabric.scorer.constraint import constraint_check as _cc
 
         t0 = time.perf_counter()
+        _slog(run_id, "constraint_check", "start: %d hypotheses, %d constraints", len(ranked_raw), len(constraints))
         kept: list[dict] = []
-        dropped: list[str] = []
+        warnings_log: list[str] = []
         for item in ranked_raw:
             hyp = Hypothesis(**item["hypothesis"])
             check = _cc(hyp, constraints)
-            if check["ok"]:
-                kept.append(item)
-            else:
-                dropped.append(hyp.claim[:80])
+            cv = check.get("violations", [])
+            item["constraint_violations"] = cv
+            kept.append(item)
+            if cv:
+                warnings_log.append(hyp.claim[:80])
+                _slog(
+                    run_id, "constraint_check",
+                    "FE4 warning: %r — %s",
+                    hyp.claim[:60], "; ".join(cv)[:120],
+                    level=logging.WARNING,
+                )
 
         latency_ms = (time.perf_counter() - t0) * 1000
 
         store.save_artifact(run_id, "constraint_check", "ranked", json.dumps(kept))
-        store.save_artifact(run_id, "constraint_check", "fe4_dropped", json.dumps(dropped))
-
-        if not kept:
-            store.set_stage_state(run_id, "constraint_check", "done")
-            trace_collector.record(
-                run_id, "constraint_check", slot="constraint",
-                token_in=0, token_out=0, latency_ms=latency_ms, status="ok",
-            )
-            errors = state.get("errors", [])
-            errors.append("constraint_check: all hypotheses dropped (FE4)")
-            return {
-                "ranked": [],
-                "fe4_dropped": dropped,
-                "errors": errors,
-                "status": "incomplete",
-            }
+        store.save_artifact(run_id, "constraint_check", "fe4_dropped", json.dumps(warnings_log))
 
         store.set_stage_state(run_id, "constraint_check", "done")
         trace_collector.record(
@@ -505,8 +599,20 @@ def make_constraint_check_node(
             token_in=0, token_out=len(kept),
             latency_ms=latency_ms, status="ok",
         )
+        if warnings_log:
+            _slog(
+                run_id, "constraint_check",
+                "done: %d hypotheses, %d with constraint warnings (%.0fms)",
+                len(kept), len(warnings_log), latency_ms,
+            )
+        else:
+            _slog(
+                run_id, "constraint_check",
+                "done: %d hypotheses, all constraints satisfied (%.0fms)",
+                len(kept), latency_ms,
+            )
 
-        return {"ranked": kept, "fe4_dropped": dropped}
+        return {"ranked": kept, "fe4_dropped": warnings_log}
 
     return constraint_check_node
 
@@ -529,17 +635,64 @@ def make_explain_node(
             return {"explained": []}
 
         scored_list = [_deserialize_scored(s) for s in ranked_raw]
+        max_explain = getattr(config, "max_explain_hypotheses", 3)
+        if len(scored_list) > max_explain:
+            scored_list = scored_list[:max_explain]
         evidence_raw = state.get("evidence", [])
         evidence = [_deserialize_chunk(c) for c in evidence_raw]
 
+        external: list[EvidenceChunk] = []
+        kpi_dict = state.get("kpi_parsed")
+        if kpi_dict and getattr(config, "external_search", "web") != "none":
+            try:
+                from hfabric.retriever.external import gather_external
+
+                _slog(run_id, "explain", "external: gathering sources=%s", getattr(config, "external_search", "web"))
+                external = gather_external(KPIParsed(**kpi_dict), scored_list, config)
+                _slog(
+                    run_id, "explain",
+                    "external: %d source(s) retrieved",
+                    len(external),
+                )
+            except Exception as exc:
+                _slog(run_id, "explain", "external FAILED: %s", exc, level=logging.WARNING)
+                errors = state.get("errors", [])
+                errors.append(f"external_search failed: {exc}")
+                state["errors"] = errors
+        evidence = evidence + external
+
         t0 = time.perf_counter()
         try:
-            explained: list[ExplainedHypothesis] = explanation.explain(
-                scored_list, evidence, kg, trace
-            )
+            try:
+                explained: list[ExplainedHypothesis] = explanation.explain(
+                    scored_list, evidence, kg, trace, external=external
+                )
+            except TypeError:
+                explained = explanation.explain(scored_list, evidence, kg, trace)
             latency_ms = (time.perf_counter() - t0) * 1000
 
+            for idx, e in enumerate(explained):
+                if idx < len(ranked_raw):
+                    cv = ranked_raw[idx].get("constraint_violations", [])
+                    if cv:
+                        e.constraint_violations = cv
+
             serialized = [_serialize_explained(e) for e in explained]
+            for i, e in enumerate(explained, 1):
+                fields_filled = sum(
+                    1 for f in (
+                        "justification", "uncertainty", "verification_plan",
+                        "general_approach", "actionable_now", "why_it_matters",
+                        "best_practices", "novelty", "risks",
+                    ) if getattr(e, f, "")
+                )
+                _slog(
+                    run_id, "explain",
+                    "hyp %d/%d: %s, %d/%d narrative fields, %d external urls",
+                    i, len(explained), e.scored.hypothesis.claim[:50],
+                    fields_filled, 9, len(e.external_urls or []),
+                )
+            state["external_used"] = len(external)
             store.save_artifact(
                 run_id, "explain", "explained", json.dumps(serialized)
             )
@@ -549,6 +702,7 @@ def make_explain_node(
                 token_in=trace.token_in, token_out=trace.token_out,
                 latency_ms=latency_ms, status=trace.status,
             )
+            _slog(run_id, "explain", "done: %d explained (%.0fms)", len(explained), latency_ms)
 
             return {"explained": serialized}
         except Exception as exc:
@@ -558,6 +712,7 @@ def make_explain_node(
                 run_id, "explain", slot="explanation",
                 token_in=0, token_out=0, latency_ms=latency_ms, status="error",
             )
+            _slog(run_id, "explain", "FAILED: %s", exc, level=logging.ERROR)
             errors = state.get("errors", [])
             errors.append(f"explain failed: {exc}")
             return {"explained": [], "errors": errors}
@@ -586,8 +741,17 @@ def make_export_node(
             language="en",
         )
 
+        notes: list[str] = []
+        mode = getattr(config, "external_search", "web")
+        if mode == "none":
+            notes.append("External sources disabled (web search off).")
+        else:
+            n_ext = state.get("external_used", 0)
+            notes.append(f"External grounding ({mode}): {n_ext} source(s) retrieved.")
+
         t0 = time.perf_counter()
         try:
+            _slog(run_id, "export", "start: %d explained", len(explained_raw))
             result = RunResult(
                 run_id=run_id,
                 session_id=session_id,
@@ -595,9 +759,17 @@ def make_export_node(
                 kpi=kpi,
                 ranked=[_deserialize_explained(e) for e in explained_raw],
                 status=state.get("status", "complete"),
+                notes=notes,
             )
 
-            export_path = exporter.export(result, session_id)
+            def _do_export():
+                return exporter.export(result, session_id)
+
+            export_path = _with_timeout(
+                _do_export,
+                config.timeout_export,
+                ("", ""),
+            )
             if isinstance(export_path, tuple):
                 json_path, md_path = export_path
             else:
@@ -622,6 +794,7 @@ def make_export_node(
                 token_in=0, token_out=0,
                 latency_ms=latency_ms, status="ok",
             )
+            _slog(run_id, "export", "done: %s, %s (%.0fms)", json_path, md_path, latency_ms)
 
             return {
                 "export_path": json_path,
@@ -636,6 +809,7 @@ def make_export_node(
                 run_id, "export", slot="export",
                 token_in=0, token_out=0, latency_ms=latency_ms, status="error",
             )
+            _slog(run_id, "export", "FAILED: %s", exc, level=logging.ERROR)
             errors = state.get("errors", [])
             errors.append(f"export failed: {exc}")
             return {"status": "incomplete", "errors": errors}
