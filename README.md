@@ -1,6 +1,3 @@
-На Гугл диске есть файл с ССЫЛКОЙ НА ДЕПЛОЙ !!!
-# Eсть ССЫЛКА НА ДЕПЛОЙ (!) (смотреть гугл диск)
-
 # hypothesis-fabric
 
 Hypothesis Fabric — a metallurgy research hypothesis generation pipeline.
