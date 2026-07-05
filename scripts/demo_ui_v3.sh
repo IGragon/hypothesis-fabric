@@ -3,7 +3,7 @@ set -euo pipefail
 
 echo "============================================================"
 echo "  Hypothesis Fabric — UI v3 + API launcher (Streamlit)"
-echo "  Session-based UI on :8505, FastAPI on :8000"
+echo "  Session-based UI on :8503, FastAPI on :8000"
 echo "============================================================"
 echo ""
 
@@ -30,13 +30,13 @@ uv run hfabric serve --port 8000 &
 API_PID=$!
 sleep 2
 
-echo "── Starting Streamlit UI v3 on :8505 ──"
-uv run hfabric serve-ui-v3 --port 8505 &
+echo "── Starting Streamlit UI v3 on :8503 ──"
+uv run hfabric serve-ui-v3 --port 8503 &
 UI_PID=$!
 
 echo ""
 echo "============================================================"
-echo "  UI v3:  http://localhost:8505"
+echo "  UI v3:  http://localhost:8503"
 echo "  API:    http://localhost:8000/docs"
 echo "  Press Ctrl-C to stop both."
 echo "============================================================"
