@@ -7,9 +7,22 @@ import re
 from hfabric.schemas import RunResult
 
 
-def _linkify(text: str, cited_refs: dict) -> str:
+def _api_base() -> str:
+    return os.environ.get("HFABRIC_API_BASE", "http://localhost:8000").rstrip("/")
+
+
+def _file_url(session_id: str, path: str, api_base: str | None = None) -> str:
+    """Build a downloadable HTTP URL for a session raw file."""
+    base = (api_base or _api_base()).rstrip("/")
+    filename = os.path.basename(path)
+    return f"{base}/sessions/{session_id}/files/{filename}"
+
+
+def _linkify(text: str, cited_refs: dict, session_id: str = "", api_base: str | None = None) -> str:
     if not text:
         return text
+
+    base = api_base or _api_base()
 
     def repl(m: "re.Match") -> str:
         marker = m.group(1).strip()
@@ -23,7 +36,11 @@ def _linkify(text: str, cited_refs: dict) -> str:
                     url = marker
                     break
         if url:
-            return f"[[{marker}]]({url})"
+            return f"[{marker}]({url})"
+        if chunk is not None:
+            path = chunk.meta.get("path", "")
+            if path and session_id:
+                return f"[{marker}]({_file_url(session_id, path, base)})"
         return f"[{marker}]"
 
     return re.sub(r"\[([^\]\n]+)\]", repl, text)
@@ -40,14 +57,14 @@ def write_export(result: RunResult, session_id: str) -> tuple[str, str]:
     with open(json_path, "w", encoding="utf-8") as f:
         f.write(json_data)
 
-    md_content = _build_report_md(result)
+    md_content = _build_report_md(result, session_id)
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(md_content)
 
     return json_path, md_path
 
 
-def _build_report_md(result: RunResult) -> str:
+def _build_report_md(result: RunResult, session_id: str = "") -> str:
     lines: list[str] = []
 
     lines.append("# Hypothesis Fabric — Research Report")
@@ -118,7 +135,7 @@ def _build_report_md(result: RunResult) -> str:
         cited_refs = eh.scored.cited_refs
 
         def lk(text: str) -> str:
-            return _linkify(text, cited_refs)
+            return _linkify(text, cited_refs, session_id)
 
         lines.append(f"**Justification:** {lk(eh.justification)}")
         lines.append("")
@@ -153,9 +170,14 @@ def _build_report_md(result: RunResult) -> str:
                     title = chunk.meta.get("title") or url
                     lines.append(f"- `[{cid}]` [{title}]({url})")
                 else:
-                    doc = chunk.meta.get("doc_id", chunk.doc_id or "")
-                    src = f" — _{doc}_" if doc else ""
-                    lines.append(f"- `[{cid}]`{src}: {chunk.text[:280]}")
+                    doc = chunk.meta.get("doc_id", chunk.doc_id or cid)
+                    path = chunk.meta.get("path", "")
+                    if path and session_id:
+                        link = _file_url(session_id, path)
+                        lines.append(f"- `[{cid}]` [{doc}]({link}) — {chunk.text[:280]}")
+                    else:
+                        src = f" — _{doc}_" if doc else ""
+                        lines.append(f"- `[{cid}]`{src}: {chunk.text[:280]}")
             lines.append("")
         else:
             lines.append("**Evidence / Sources:** None")

@@ -133,7 +133,12 @@ def build_real_orchestrator(
         per_hyp_timeout = getattr(config, "timeout_explain_per_hypothesis", None)
         if per_hyp_timeout is None:
             per_hyp_timeout = getattr(config, "timeout_explain", 120) / max(1, getattr(config, "max_explain_hypotheses", 3))
-        explanation = ExplainSlot(llm, timeout_seconds=per_hyp_timeout)
+        explanation = ExplainSlot(
+            llm,
+            timeout_seconds=per_hyp_timeout,
+            use_structured_output=getattr(config, "explain_use_structured_output", True),
+            workers=getattr(config, "explain_workers", 3),
+        )
 
     if exporter is None:
         if config.export_format == "docx":

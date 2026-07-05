@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from langchain_core.language_models import BaseChatModel
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from hfabric.contracts import KGProtocol
 from hfabric.schemas import (
@@ -52,6 +53,26 @@ class _ExplainOutput(BaseModel):
     novelty: str = Field("", description="Насколько ново по сравнению с известными решениями")
     risks: str = Field("", description="Технические и экономические риски")
 
+    @field_validator("effect_cause_examples", mode="before")
+    @classmethod
+    def _flatten_examples(cls, v):
+        if v is None:
+            return []
+        out: list[str] = []
+        for item in v:
+            if isinstance(item, str):
+                out.append(item)
+            elif isinstance(item, dict):
+                for key in ("example", "text", "value", "content"):
+                    if key in item and isinstance(item[key], str):
+                        out.append(item[key])
+                        break
+                else:
+                    out.append(str(item))
+            else:
+                out.append(str(item))
+        return out
+
 
 _PROMPT_TEMPLATE = """Вы — аналитик-металлург. Составьте строгое, подтверждённое ссылками \
 обоснование для приведённой ниже гипотезы. КАЖДЫЙ раздел ДОЛЖЕН ссылаться хотя бы на один \
@@ -73,7 +94,25 @@ _PROMPT_TEMPLATE = """Вы — аналитик-металлург. Состав
 
 Заполните КАЖДОЕ поле. Каждое поле должно содержать хотя бы одну ссылку [id] из доказательств выше. \
 Если в доказательствах нет прямого подтверждения для поля, сошлитесь на ближайший релевантный \
-источник и явно укажите ограничение. Все тексты пишите на русском языке:
+источник и явно укажите ограничение. Все тексты пишите на русском языке.
+
+ВАЖНО: Если структурированный вывод недоступен, ответьте ОБЫЧНЫМ ТЕКСТОМ, обернув каждое поле \
+в точные XML-теги в нижнем регистре, как показано ниже (без атрибутов, без markdown-заголовков):
+<justification>почему правдоподобно (2-3 предложения)</justification>
+<uncertainty>пробелы/допущения (1-2 предложения)</uncertainty>
+<verification_plan>конкретный план проверки — шаги, ресурсы, критерии успеха/неудачи</verification_plan>
+<effect_cause_examples>
+<example>2-3 конкретные пары "если X, то Y", основанные на доказательствах</example>
+<example>вторая пара</example>
+</effect_cause_examples>
+<general_approach>как этот класс задач решается в целом по процитированным источникам</general_approach>
+<actionable_now>что лаборатория может сделать НА ЭТОЙ НЕДЕЛЕ</actionable_now>
+<why_it_matters>связь с целевым KPI и бизнес-ценностью</why_it_matters>
+<best_practices>установленные методы/стандарты в корпусе источников</best_practices>
+<novelty>насколько ново по сравнению с известными решениями</novelty>
+<risks>технические и экономические риски</risks>
+
+Содержание полей:
 - justification: почему правдоподобно (2-3 предложения)
 - uncertainty: пробелы/допущения (1-2 предложения)
 - verification_plan: конкретный план проверки — шаги, ресурсы, критерии успеха/неудачи
@@ -201,6 +240,64 @@ def _gate_sections(data: dict, available: dict[str, EvidenceChunk]) -> tuple[dic
     return section_citations, uncovered
 
 
+_TAG_FIELDS = (
+    "justification",
+    "uncertainty",
+    "verification_plan",
+    "effect_cause_examples",
+    "general_approach",
+    "actionable_now",
+    "why_it_matters",
+    "best_practices",
+    "novelty",
+    "risks",
+)
+
+
+def _parse_tagged_sections(raw: str) -> dict[str, str | list[str]]:
+    """Parse XML-style tagged sections from a free-text LLM response.
+
+    Recognises <field>...</field> tags (case-insensitive) for every narrative
+    field.  ``effect_cause_examples`` is parsed as a list of <example>...</example>
+    items.  Unrecognised bare text before the first tag is treated as the
+    justification (so partially-tagged responses still yield *something*).
+    Returns an empty dict when no tags are present, so callers can fall back
+    to the header-based parser.
+    """
+    out: dict[str, str | list[str]] = {}
+    for field in _TAG_FIELDS:
+        m = re.search(
+            rf"<{field}\s*>(.*?)</{field}\s*>",
+            raw,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if m is None:
+            continue
+        body = m.group(1).strip()
+        if field == "effect_cause_examples":
+            items = [
+                it.strip()
+                for it in re.findall(
+                    r"<example\s*>(.*?)</example\s*>", body, flags=re.IGNORECASE | re.DOTALL
+                )
+                if it.strip()
+            ]
+            if items:
+                out[field] = items
+        else:
+            if body:
+                out[field] = body
+
+    if not out:
+        return {}
+
+    if "justification" not in out:
+        head = raw.split("<", 1)[0].strip()
+        if head:
+            out["justification"] = head
+    return out
+
+
 def _parse_free_text_sections(raw: str) -> dict[str, str | list[str]]:
     """Parse a free-text LLM response into sections by header detection.
 
@@ -259,10 +356,19 @@ def _parse_free_text_sections(raw: str) -> dict[str, str | list[str]]:
 
 
 class ExplainSlot:
-    def __init__(self, llm: BaseChatModel, max_reprompt: int = 2, timeout_seconds: float = 90.0):
+    def __init__(
+        self,
+        llm: BaseChatModel,
+        max_reprompt: int = 2,
+        timeout_seconds: float = 90.0,
+        use_structured_output: bool = True,
+        workers: int = 3,
+    ):
         self._llm = llm
         self._max_reprompt = max_reprompt
         self._timeout = timeout_seconds
+        self._use_structured = use_structured_output
+        self._workers = max(1, workers)
 
     def _invoke_structured(self, prompt: str) -> _ExplainOutput | None:
         import threading
@@ -279,7 +385,9 @@ class ExplainSlot:
                 try:
                     response = self._llm.invoke(prompt)
                     text = response.content if hasattr(response, "content") else str(response)
-                    sections = _parse_free_text_sections(str(text))
+                    sections = _parse_tagged_sections(str(text))
+                    if not sections:
+                        sections = _parse_free_text_sections(str(text))
                     ece = sections.get("effect_cause_examples", [])
                     if isinstance(ece, str):
                         ece = [l.strip().lstrip("-*\u2022").strip() for l in ece.split("\n") if l.strip()]
@@ -324,9 +432,10 @@ class ExplainSlot:
         external = external or []
 
         t0 = time.time()
-        results: list[ExplainedHypothesis] = []
+        n = len(ranked)
 
-        for idx, scored in enumerate(ranked, 1):
+        def _one(idx_scored: tuple[int, ScoredHypothesis]) -> tuple[int, ExplainedHypothesis, int, int]:
+            idx, scored = idx_scored
             neighbourhood_lines = _build_kg_neighbourhood(scored, kg)
 
             available: dict[str, EvidenceChunk] = dict(scored.cited_refs)
@@ -359,13 +468,21 @@ class ExplainSlot:
             data = dict(_FALLBACK)
             data["effect_cause_examples"] = []
 
-            output = self._invoke_structured(prompt)
+            if not self._use_structured:
+                output = None
+            else:
+                output = self._invoke_structured(prompt)
             if output is None:
-                _log.info("hyp %d/%d: structured timed out, retrying once with plain invoke", idx, len(ranked))
+                if self._use_structured:
+                    _log.info("hyp %d/%d: structured failed/timed out, falling back to plain invoke", idx, n)
+                else:
+                    _log.info("hyp %d/%d: plain invoke (structured disabled)", idx, n)
                 try:
                     response = self._llm.invoke(prompt)
                     text = response.content if hasattr(response, "content") else str(response)
-                    sections = _parse_free_text_sections(str(text))
+                    sections = _parse_tagged_sections(str(text))
+                    if not sections:
+                        sections = _parse_free_text_sections(str(text))
                     ece_raw = sections.pop("effect_cause_examples", None)
                     data.update(sections)
                     if isinstance(ece_raw, list) and ece_raw:
@@ -373,7 +490,7 @@ class ExplainSlot:
                     data.setdefault("justification", str(text)[:2000])
                     token_out = len(str(text))
                 except Exception as e:
-                    _log.warning("hyp %d/%d: plain invoke retry also failed: %s", idx, len(ranked), e)
+                    _log.warning("hyp %d/%d: plain invoke also failed: %s", idx, n, e)
             else:
                 data = output.model_dump()
                 token_out = len(str(data))
@@ -389,7 +506,7 @@ class ExplainSlot:
                 attempts += 1
                 _log.info(
                     "hyp %d/%d: %d sections uncovered, re-prompt %d/%d",
-                    idx, len(ranked), uncovered, attempts, self._max_reprompt,
+                    idx, n, uncovered, attempts, self._max_reprompt,
                 )
                 retry = self._invoke_structured(prompt + _REPROMPT_SUFFIX)
                 if retry is None:
@@ -410,41 +527,59 @@ class ExplainSlot:
                 if is_cited and url:
                     external_urls.append(url)
 
-            scored = ScoredHypothesis(
+            scored_copy = ScoredHypothesis(
                 hypothesis=scored.hypothesis,
                 score=scored.score,
                 features=scored.features,
                 cited_refs=merged_refs,
             )
 
-            if trace is not None:
-                trace.token_in += token_in
-                trace.token_out += token_out
-
             filled = sum(1 for f in _NARRATIVE_SECTIONS if str(data.get(f, "")).strip())
             _log.info(
                 "hyp %d/%d: %s — %d/9 narrative fields filled, %d external urls cited",
-                idx, len(ranked), hyp.claim[:50], filled, len(external_urls),
+                idx, n, hyp.claim[:50], filled, len(external_urls),
             )
 
-            results.append(
-                ExplainedHypothesis(
-                    scored=scored,
-                    justification=str(data.get("justification") or _FALLBACK["justification"]),
-                    uncertainty=str(data.get("uncertainty") or _FALLBACK["uncertainty"]),
-                    verification_plan=str(data.get("verification_plan") or _FALLBACK["verification_plan"]),
-                    graph_neighbourhood=neighbourhood_lines,
-                    effect_cause_examples=list(data.get("effect_cause_examples") or []),
-                    general_approach=str(data.get("general_approach") or ""),
-                    actionable_now=str(data.get("actionable_now") or ""),
-                    why_it_matters=str(data.get("why_it_matters") or ""),
-                    best_practices=str(data.get("best_practices") or ""),
-                    novelty=str(data.get("novelty") or ""),
-                    risks=str(data.get("risks") or ""),
-                    section_citations=section_citations,
-                    external_urls=list(dict.fromkeys(external_urls)),
-                )
+            eh = ExplainedHypothesis(
+                scored=scored_copy,
+                justification=str(data.get("justification") or _FALLBACK["justification"]),
+                uncertainty=str(data.get("uncertainty") or _FALLBACK["uncertainty"]),
+                verification_plan=str(data.get("verification_plan") or _FALLBACK["verification_plan"]),
+                graph_neighbourhood=neighbourhood_lines,
+                effect_cause_examples=list(data.get("effect_cause_examples") or []),
+                general_approach=str(data.get("general_approach") or ""),
+                actionable_now=str(data.get("actionable_now") or ""),
+                why_it_matters=str(data.get("why_it_matters") or ""),
+                best_practices=str(data.get("best_practices") or ""),
+                novelty=str(data.get("novelty") or ""),
+                risks=str(data.get("risks") or ""),
+                section_citations=section_citations,
+                external_urls=list(dict.fromkeys(external_urls)),
             )
+            return idx, eh, token_in, token_out
+
+        workers = min(self._workers, n) if n > 0 else 1
+        results: list[ExplainedHypothesis] = [None] * n  # type: ignore[list-item]
+        total_in = 0
+        total_out = 0
+        if workers <= 1 or n <= 1:
+            for item in enumerate(ranked, 1):
+                idx, eh, ti, to = _one(item)
+                results[idx - 1] = eh
+                total_in += ti
+                total_out += to
+        else:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="explain") as pool:
+                futures = [pool.submit(_one, item) for item in enumerate(ranked, 1)]
+                for fut in futures:
+                    idx, eh, ti, to = fut.result()
+                    results[idx - 1] = eh
+                    total_in += ti
+                    total_out += to
+
+        if trace is not None:
+            trace.token_in += total_in
+            trace.token_out += total_out
 
         latency_ms = (time.time() - t0) * 1000
         if trace is not None:

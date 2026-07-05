@@ -70,6 +70,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     serve_pg.add_argument("--port", type=int, default=8502, help="Port to listen on")
     serve_pg.set_defaults(func=cmd_serve_playground)
 
+    serve_ui3 = sub.add_parser("serve-ui-v3", help="Start Streamlit UI v3 (session-based)")
+    serve_ui3.add_argument("--port", type=int, default=8503, help="Port to listen on")
+    serve_ui3.set_defaults(func=cmd_serve_ui_v3)
+
     return parser
 
 
@@ -484,10 +488,24 @@ def cmd_serve_playground(args: argparse.Namespace) -> None:
     stcli.main()
 
 
+def cmd_serve_ui_v3(args: argparse.Namespace) -> None:
+    _load_env()
+    _configure_logging()
+    from streamlit.web import cli as stcli
+
+    ui_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "ui_v3", "app.py")
+    if not os.path.isfile(ui_path):
+        print(f"Error: UI v3 not found at {ui_path}", file=sys.stderr)
+        sys.exit(1)
+    sys.argv = ["streamlit", "run", ui_path, "--server.port", str(args.port),
+                "--server.headless", "true", "--server.fileWatcherType", "none"]
+    stcli.main()
+
+
 def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
-    if args.command in ("run", "eval", "rerun", "serve", "serve-ui", "serve-playground"):
+    if args.command in ("run", "eval", "rerun", "serve", "serve-ui", "serve-playground", "serve-ui-v3"):
         _load_env()
         _configure_logging()
     args.func(args)

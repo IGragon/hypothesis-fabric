@@ -153,6 +153,22 @@ async def upload_files(session_id: str, files: list[UploadFile] = File(...)):
     return {"session_id": session_id, "saved": saved, "count": len(saved)}
 
 
+@app.get("/sessions/{session_id}/files/{filename:path}")
+async def serve_session_file(session_id: str, filename: str):
+    """Serve a raw uploaded file from a session's raw_files directory.
+
+    Used by export reports and the UI to provide downloadable HTTP links to
+    the source documents that back each evidence chunk (browsers block
+    ``file://`` URLs for security).
+    """
+    safe = os.path.normpath(filename).lstrip("/\\")
+    base = _session_manager().raw_files_dir(session_id)
+    path = os.path.join(base, safe)
+    if not os.path.isfile(path) or not os.path.abspath(path).startswith(os.path.abspath(base)):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path, filename=os.path.basename(path))
+
+
 @app.post("/sessions/{session_id}/run")
 async def run_pipeline(
     session_id: str, payload: dict[str, Any]
@@ -459,6 +475,22 @@ async def get_results(session_id: str):
     if session_id not in _sessions:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"session_id": session_id, "runs": _sessions[session_id].get("runs", [])}
+
+
+@app.get("/sessions/{session_id}/latest")
+async def get_latest_result(session_id: str):
+    """Return the latest persisted run result for a session.
+
+    The export writer saves ``hypotheses.json`` directly under
+    ``sessions/<sid>/export/`` (overwriting on each run), so the latest result
+    is always whatever is on disk — independent of the in-memory ``_sessions``
+    registry (which is lost on restart).  ``run_id`` is read from the file's
+    ``run_id`` field when present.
+    """
+    data = _load_run_result(session_id, "__latest__")
+    if data is None:
+        raise HTTPException(status_code=404, detail="No run result found for session")
+    return data
 
 
 @app.get("/sessions/{session_id}/runs/{run_id}/eval")

@@ -22,7 +22,7 @@ class TestBindClaims:
         assert "chunk_001" in scored[0].cited_refs
         assert coverage == 1.0
 
-    def test_unrelated_claim_not_matched(self, sample_chunks):
+    def test_unrelated_claim_still_matched_by_chunk_id(self, sample_chunks):
         hyp = Hypothesis(
             claim="Quantum entanglement improves froth stability in flotation cells",
             mechanism="Entangled particles reduce surface tension",
@@ -33,8 +33,8 @@ class TestBindClaims:
         scored, coverage = bind_claims([hyp], cmap, threshold=55.0)
 
         assert len(scored) == 1
-        assert scored[0].cited_refs == {}
-        assert coverage == 0.0
+        assert "chunk_001" in scored[0].cited_refs
+        assert coverage == 1.0
 
     def test_missing_chunk_id_unmatched(self, sample_hypotheses, sample_chunks):
         hyp = Hypothesis(
@@ -68,13 +68,13 @@ class TestBindClaims:
         cmap = _chunks_map(sample_chunks)
         scored, coverage = bind_claims(hypotheses, cmap, threshold=55.0)
 
-        # chunk_001 text is about xanthate collectors → matches H1 claim
-        # chunk_002 text is about cyanide → NOT match H1 claim
-        # chunk_003 text is about sodium sulphide → NOT match H2 claim
-        # chunk_001 text is about xanthate collectors → NOT match H2 claim
-        # So matched: chunk_001 for H1 only → 1/4 = 0.25
-        assert coverage == 0.25
+        # All chunk_ids exist in the map → all matched (trust chunk_id refs)
+        assert coverage == 1.0
         assert len(scored) == 2
+        assert "chunk_001" in scored[0].cited_refs
+        assert "chunk_002" in scored[0].cited_refs
+        assert "chunk_003" in scored[1].cited_refs
+        assert "chunk_001" in scored[1].cited_refs
 
     def test_empty_evidence_refs(self, sample_chunks):
         hyp = Hypothesis(
@@ -234,7 +234,7 @@ class TestMultilingualCitation:
         assert "chunk_ru_003" in scored[1].cited_refs
         assert coverage == 1.0
 
-    def test_russian_claim_unrelated_chunk_not_matched(self):
+    def test_russian_claim_chunk_id_still_matched(self):
         hyp = Hypothesis(
             claim="Квантовая запутанность улучшает стабильность пены",
             mechanism="Запутанные частицы снижают поверхностное натяжение",
@@ -244,4 +244,5 @@ class TestMultilingualCitation:
         cmap = {"chunk_ru_001": RU_CHUNK_1}
         scored, coverage = bind_claims([hyp], cmap, threshold=55.0)
 
-        assert coverage == 0.0
+        assert "chunk_ru_001" in scored[0].cited_refs
+        assert coverage == 1.0

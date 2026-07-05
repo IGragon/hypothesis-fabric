@@ -10,6 +10,8 @@ from hfabric.explain.explain_slot import (
     _build_kg_neighbourhood,
     _cited_in,
     _gate_sections,
+    _parse_free_text_sections,
+    _parse_tagged_sections,
 )
 from hfabric.schemas import (
     EvidenceChunk,
@@ -231,3 +233,48 @@ class TestExplainSlot:
         assert trace.token_in > 0
         assert trace.token_out == 0
         assert trace.latency_ms >= 0
+
+
+class TestTagParsing:
+    def test_tagged_sections_extracted(self):
+        tagged = (
+            "<justification>Потому что [chunk_0001] это подтверждает.</justification>\n"
+            "<uncertainty>Не хватает данных [web:abc123].</uncertainty>\n"
+            "<verification_plan>Шаг 1: измерить. Шаг 2: проверить.</verification_plan>\n"
+            "<effect_cause_examples>\n"
+            "<example>Если X, то Y [chunk_0001].</example>\n"
+            "<example>Если Z, то W.</example>\n"
+            "</effect_cause_examples>\n"
+            "<general_approach>Стандарт.</general_approach>\n"
+            "<actionable_now>На неделе.</actionable_now>\n"
+            "<why_it_matters>Снижает потери.</why_it_matters>\n"
+            "<best_practices>Метод А.</best_practices>\n"
+            "<novelty>Новое.</novelty>\n"
+            "<risks>Риск 1.</risks>"
+        )
+        out = _parse_tagged_sections(tagged)
+        assert set(out.keys()) >= {
+            "justification", "uncertainty", "verification_plan",
+            "effect_cause_examples", "general_approach", "actionable_now",
+            "why_it_matters", "best_practices", "novelty", "risks",
+        }
+        assert "[chunk_0001]" in out["justification"]
+        assert isinstance(out["effect_cause_examples"], list)
+        assert len(out["effect_cause_examples"]) == 2
+        assert "Если X" in out["effect_cause_examples"][0]
+        assert "Риск 1." in out["risks"]
+
+    def test_tagged_returns_empty_when_no_tags(self):
+        assert _parse_tagged_sections("just text without tags\n### justification\nbody") == {}
+
+    def test_header_parsing_still_works_for_markdown(self):
+        md = "### justification\nГипотеза [c1].\n\n### risks\nРиск 1."
+        out = _parse_free_text_sections(md)
+        assert "justification" in out
+        assert "risks" in out
+        assert "Гипотеза" in out["justification"]
+
+    def test_tagged_is_case_insensitive(self):
+        tagged = "<JUSTIFICATION>Text [c1].</JUSTIFICATION>"
+        out = _parse_tagged_sections(tagged)
+        assert out.get("justification") == "Text [c1]."

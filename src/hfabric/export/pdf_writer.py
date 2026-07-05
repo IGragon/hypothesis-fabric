@@ -18,6 +18,88 @@ from reportlab.lib import colors
 
 from hfabric.schemas import RunResult
 
+_CYRILLIC_FONT_DIRS = [
+    "/usr/share/fonts/truetype/dejavu",
+    "/usr/share/fonts/truetype/liberation",
+    "/usr/share/fonts/dejavu",
+    "/usr/local/share/fonts",
+    os.path.expanduser("~/.fonts"),
+]
+
+
+def _register_cyrillic_fonts() -> tuple[str, str, str]:
+    """Register a Cyrillic-capable TTF font family with reportlab.
+
+    Returns (regular_name, bold_name, italic_name).  Falls back to
+    Helvetica (no Cyrillic) if no suitable TTF is found, so the PDF
+    still builds (with black squares) rather than crashing.
+    """
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    candidates = [
+        ("DejaVuSans", "DejaVuSans-Regular.ttf"),
+        ("DejaVuSans", "DejaVuSans.ttf"),
+        ("LiberationSans", "LiberationSans-Regular.ttf"),
+    ]
+    bold_candidates = [
+        ("DejaVuSans-Bold", "DejaVuSans-Bold.ttf"),
+        ("LiberationSans-Bold", "LiberationSans-Bold.ttf"),
+    ]
+    italic_candidates = [
+        ("DejaVuSans-Oblique", "DejaVuSans-Oblique.ttf"),
+        ("DejaVuSans-BoldOblique", "DejaVuSans-BoldOblique.ttf"),
+        ("LiberationSans-Italic", "LiberationSans-Italic.ttf"),
+    ]
+
+    def _find(name_hint: str) -> str | None:
+        for d in _CYRILLIC_FONT_DIRS:
+            p = os.path.join(d, name_hint)
+            if os.path.isfile(p):
+                return p
+        return None
+
+    regular = bold = italic = None
+    for reg_name, file_hint in candidates:
+        p = _find(file_hint)
+        if p:
+            try:
+                pdfmetrics.registerFont(TTFont(reg_name, p))
+                regular = reg_name
+                break
+            except Exception:
+                continue
+    for bold_name, file_hint in bold_candidates:
+        p = _find(file_hint)
+        if p:
+            try:
+                pdfmetrics.registerFont(TTFont(bold_name, p))
+                bold = bold_name
+                break
+            except Exception:
+                continue
+    for ital_name, file_hint in italic_candidates:
+        p = _find(file_hint)
+        if p:
+            try:
+                pdfmetrics.registerFont(TTFont(ital_name, p))
+                italic = ital_name
+                break
+            except Exception:
+                continue
+
+    if not regular:
+        regular = "Helvetica"
+    if not bold:
+        bold = "Helvetica-Bold"
+    if not italic:
+        italic = "Helvetica-Oblique"
+
+    pdfmetrics.registerFontFamily(
+        regular, normal=regular, bold=bold, italic=italic, boldItalic=bold,
+    )
+    return regular, bold, italic
+
 
 def _linkify_pdf(text: str, cited_refs: dict) -> str:
     if not text:
@@ -41,12 +123,49 @@ def _linkify_pdf(text: str, cited_refs: dict) -> str:
     return re.sub(r"\[([^\]\n]+)\]", repl, text)
 
 
+def _api_base() -> str:
+    return os.environ.get("HFABRIC_API_BASE", "http://localhost:8000").rstrip("/")
+
+
+def _file_url_pdf(session_id: str, path: str) -> str:
+    base = _api_base()
+    filename = os.path.basename(path)
+    return f"{base}/sessions/{session_id}/files/{filename}"
+
+
+def _chunk_link_pdf(marker: str, cited_refs: dict, session_id: str = "") -> str:
+    """Build a clickable link for a chunk-id reference inside PDF body text."""
+    chunk = cited_refs.get(marker)
+    if chunk is not None:
+        url = chunk.meta.get("url")
+        if url:
+            return f'<a href="{url}">[{marker}]</a>'
+        path = chunk.meta.get("path", "")
+        if path and session_id:
+            return f'<a href="{_file_url_pdf(session_id, path)}">[{marker}]</a>'
+    return f"[{marker}]"
+
+
+def _linkify_pdf_v2(text: str, cited_refs: dict, session_id: str = "") -> str:
+    """Like _linkify_pdf but also links local chunks by HTTP file URL."""
+    if not text:
+        return text
+
+    def repl(m: "re.Match") -> str:
+        marker = m.group(1).strip()
+        return _chunk_link_pdf(marker, cited_refs, session_id)
+
+    return re.sub(r"\[([^\]\n]+)\]", repl, text)
+
+
 def write_pdf(result: RunResult, session_id: str) -> str:
     from reportlab.lib.pagesizes import A4
 
     export_dir = os.path.join("sessions", session_id, "export")
     os.makedirs(export_dir, exist_ok=True)
     path = os.path.join(export_dir, "report.pdf")
+
+    font_reg, font_bold, font_ital = _register_cyrillic_fonts()
 
     doc = SimpleDocTemplate(
         path,
@@ -58,11 +177,13 @@ def write_pdf(result: RunResult, session_id: str) -> str:
         title="Hypothesis Fabric Report",
     )
     base = getSampleStyleSheet()
-    h1 = base["Heading1"]
-    h2 = base["Heading2"]
-    h3 = ParagraphStyle("H3", parent=base["Heading2"], fontSize=11, spaceBefore=6, spaceAfter=3)
-    body = ParagraphStyle("Body", parent=base["BodyText"], fontSize=9, leading=12, spaceAfter=4)
-    small = ParagraphStyle("Small", parent=body, fontSize=8, textColor=colors.grey)
+    h1 = ParagraphStyle("H1c", parent=base["Heading1"], fontName=font_bold, fontSize=16)
+    h2 = ParagraphStyle("H2c", parent=base["Heading2"], fontName=font_bold, fontSize=13)
+    h3 = ParagraphStyle("H3c", fontName=font_bold, fontSize=11, spaceBefore=6, spaceAfter=3,
+                        textColor=colors.HexColor("#1a6b4a"))
+    body = ParagraphStyle("BodyC", fontName=font_reg, fontSize=9, leading=12, spaceAfter=4)
+    small = ParagraphStyle("SmallC", fontName=font_reg, fontSize=8, leading=10,
+                           textColor=colors.grey, spaceAfter=2)
 
     story = []
     story.append(Paragraph("Hypothesis Fabric — Research Report", h1))
@@ -97,7 +218,7 @@ def write_pdf(result: RunResult, session_id: str) -> str:
         cited_refs = eh.scored.cited_refs
 
         def lk(text: str) -> str:
-            return _linkify_pdf(text, cited_refs)
+            return _linkify_pdf_v2(text, cited_refs, session_id)
 
         story.append(Paragraph(f"#{rank}. {h.claim} (Score: {score:.2f})", h3))
         story.append(Paragraph(f"<b>Mechanism:</b> {h.mechanism}", body))
@@ -120,9 +241,22 @@ def write_pdf(result: RunResult, session_id: str) -> str:
         story.append(Paragraph(f"<b>Verification plan (roadmap):</b> {lk(eh.verification_plan)}", body))
 
         if cited_refs:
-            story.append(Paragraph("<b>Evidence / Sources:</b><br/>" + "<br/>".join(
-                f"- [{cid}] {c.meta.get('url') or c.meta.get('title') or (c.text[:200])}"
-                for cid, c in cited_refs.items()), small))
+            story.append(Paragraph("<b>Evidence / Sources:</b>", body))
+            for cid, c in cited_refs.items():
+                meta = c.meta or {}
+                url = meta.get("url")
+                doc_name = meta.get("doc_id", c.doc_id or cid)
+                page = meta.get("page", "")
+                loc = f" стр. {page}" if page else ""
+                if url:
+                    title = meta.get("title") or url
+                    story.append(Paragraph(
+                        f'- <a href="{url}">[{cid}]</a> <b>{doc_name}</b>{loc}: {c.text[:200]}', small))
+                else:
+                    fpath = meta.get("path", "")
+                    link = f"<a href=\"{_file_url_pdf(session_id, fpath)}\">[{cid}]</a>" if fpath else f"[{cid}]"
+                    story.append(Paragraph(
+                        f"- {link} <b>{doc_name}</b>{loc}: {c.text[:200]}", small))
         else:
             story.append(Paragraph("<b>Evidence / Sources:</b> None", body))
 

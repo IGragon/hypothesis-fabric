@@ -59,6 +59,8 @@ class MVPConfig:
     timeout_explain: int = 120
     timeout_explain_per_hypothesis: float = 90.0
     max_explain_hypotheses: int = 3
+    explain_use_structured_output: bool = False
+    explain_workers: int = 3
     timeout_export: int = 30
 
     # Gates
