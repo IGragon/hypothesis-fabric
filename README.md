@@ -18,6 +18,8 @@ slots (rerank, generate, explain). Everything else is deterministic Python.
   (default provider is `deepseek`; override via `HFABRIC_PROVIDER` in `.env`
   or `--provider` on the CLI)
 
+Сейчас по-дефолту используется провайдер Yandex AI Studio, из провайдеров можно заполнить только YC_FOLDER_ID и YC_API_KEY
+
 Optional (recommended):
 
 - `HF_TOKEN` — HuggingFace access token to avoid rate limits when downloading
