@@ -9,6 +9,8 @@ generates ranked hypotheses with citations, scores them, and exports a report.
 The pipeline runs as a LangGraph state machine with an LLM confined to declared
 slots (rerank, generate, explain). Everything else is deterministic Python.
 
+![](imgs/image.png)
+
 ## Prerequisites
 
 - [uv](https://docs.astral.sh/uv/) (package manager)
